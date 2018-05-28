@@ -66,10 +66,8 @@ struct TerrainQuad
 
 	void computeAABB(float scale)
 	{
-		m_aabb.min = m_min;
-		m_aabb.max = m_min + Vec3(m_size * scale, 0, m_size * scale);
-		m_aabb.max.y = FLT_MAX;
-		m_aabb.min.y = -FLT_MAX;
+		m_aabb.min = Vec3(m_min.x * scale, -FLT_MAX, m_min.z * scale);
+		m_aabb.max = Vec3(m_aabb.min.x + m_size * scale, FLT_MAX, m_aabb.min.z + m_size * scale);
 		for (int i = 0; i < CHILD_COUNT; ++i)
 		{
 			if (m_children[i]) m_children[i]->computeAABB(scale);
@@ -617,10 +615,10 @@ void Terrain::deserialize(InputBlob& serializer, Universe& universe, RenderScene
 	serializer.read(m_layer_mask);
 	char path[MAX_PATH_LENGTH];
 	serializer.readString(path, MAX_PATH_LENGTH);
-	setMaterial(static_cast<Material*>(scene.getEngine().getResourceManager().get(Material::TYPE)->load(Path(path))));
 	serializer.read(m_scale.x);
 	serializer.read(m_scale.y);
 	m_scale.z = m_scale.x;
+	setMaterial(static_cast<Material*>(scene.getEngine().getResourceManager().get(Material::TYPE)->load(Path(path))));
 	i32 count;
 	serializer.read(count);
 	while(m_grass_types.size() > count)

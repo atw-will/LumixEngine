@@ -635,6 +635,7 @@ public:
 		SDL_GetWindowSize(m_window, &w, &h);
 		ImVec2 size((float)w, (float)h);
 		ImGui::SetNextWindowSize(size);
+		ImGui::SetNextWindowPos({ 0, 0 }, ImGuiCond_FirstUseEver);
 		if (ImGui::Begin("Welcome", nullptr, flags))
 		{
 			ImGui::Text("Welcome to Lumix Studio");
@@ -1267,14 +1268,13 @@ public:
 		getEntityListDisplayName(*m_editor, buffer, sizeof(buffer), entity);
 		bool selected = selected_entities.indexOf(entity) >= 0;
 		ImGui::PushID(entity.index);
-		if (ImGui::Selectable(buffer, &selected))
-		{
-			m_editor->selectEntities(&entity, 1, true);
-		}
-		if (ImGui::IsMouseReleased(1) && ImGui::IsItemHovered())
-		{
-			ImGui::OpenPopup("entity_context_menu");
-		}
+		ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_AllowItemOverlap;
+		bool has_child = universe->getFirstChild(entity).isValid();
+		if (!has_child) flags = ImGuiTreeNodeFlags_Leaf;
+		if (selected) flags |= ImGuiTreeNodeFlags_Selected;
+		bool node_open = ImGui::TreeNodeEx(buffer, flags);
+		if (ImGui::IsItemClicked(0)) m_editor->selectEntities(&entity, 1, true);
+		if (ImGui::IsMouseReleased(1) && ImGui::IsItemHovered()) ImGui::OpenPopup("entity_context_menu");
 		if (ImGui::BeginPopup("entity_context_menu"))
 		{
 			if (ImGui::MenuItem("Create child"))
@@ -1303,6 +1303,7 @@ public:
 				if (dropped_entity != entity)
 				{
 					m_editor->makeParent(entity, dropped_entity);
+					if (node_open) ImGui::TreePop();
 					return;
 				}
 			}
@@ -1310,12 +1311,14 @@ public:
 			ImGui::EndDragDropTarget();
 		}
 
-		ImGui::Indent();
-		for (Entity e = universe->getFirstChild(entity); e.isValid(); e = universe->getNextSibling(e))
+		if (node_open)
 		{
-			showHierarchy(e, selected_entities);
+			for (Entity e = universe->getFirstChild(entity); e.isValid(); e = universe->getNextSibling(e))
+			{
+				showHierarchy(e, selected_entities);
+			}
+			ImGui::TreePop();
 		}
-		ImGui::Unindent();
 	}
 
 
@@ -1349,6 +1352,7 @@ public:
 						char buffer[1024];
 						getEntityListDisplayName(*m_editor, buffer, sizeof(buffer), e);
 						if (stristr(buffer, filter) == nullptr) continue;
+						ImGui::PushID(e.index);
 						bool selected = entities.indexOf(e) >= 0;
 						if (ImGui::Selectable(buffer, &selected))
 						{
@@ -1360,6 +1364,7 @@ public:
 							ImGui::SetDragDropPayload("entity", &e, sizeof(e));
 							ImGui::EndDragDropSource();
 						}
+						ImGui::PopID();
 					}
 				}
 				ImGui::PopItemWidth();
@@ -1412,7 +1417,7 @@ public:
 	void initIMGUI()
 	{
 		ImGuiIO& io = ImGui::GetIO();
-		io.NavFlags |= ImGuiNavFlags_EnableKeyboard;
+		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 		float ddpi;
 		float font_scale = 1;
 		if (SDL_GetDisplayDPI(0, &ddpi, nullptr, nullptr) == 0) font_scale = ddpi / 96;
@@ -1672,16 +1677,14 @@ public:
 		PluginManager& plugin_manager = m_editor->getEngine().getPluginManager();
 		void* lib = plugin_manager.getLibrary(m_watched_plugin.plugin);
 
-		for (Universe* universe : m_editor->getEngine().getUniverses())
+		Universe* universe = m_editor->getUniverse();
+		for (IScene* scene : universe->getScenes())
 		{
-			for (IScene* scene : universe->getScenes())
-			{
-				if (&scene->getPlugin() != m_watched_plugin.plugin) continue;
-				if (m_editor->isGameMode()) scene->stopGame();
-				scene->serialize(blob);
-				universe->removeScene(scene);
-				scene->getPlugin().destroyScene(scene);
-			}
+			if (&scene->getPlugin() != m_watched_plugin.plugin) continue;
+			if (m_editor->isGameMode()) scene->stopGame();
+			scene->serialize(blob);
+			universe->removeScene(scene);
+			scene->getPlugin().destroyScene(scene);
 		}
 		plugin_manager.unload(m_watched_plugin.plugin);
 
@@ -1695,15 +1698,12 @@ public:
 		}
 
 		InputBlob input_blob(blob);
-		for (Universe* universe : m_editor->getEngine().getUniverses())
+		m_watched_plugin.plugin->createScenes(*universe);
+		for (IScene* scene : universe->getScenes())
 		{
-			m_watched_plugin.plugin->createScenes(*universe);
-			for (IScene* scene : universe->getScenes())
-			{
-				if (&scene->getPlugin() != m_watched_plugin.plugin) continue;
-				scene->deserialize(input_blob);
-				if (m_editor->isGameMode()) scene->startGame();
-			}
+			if (&scene->getPlugin() != m_watched_plugin.plugin) continue;
+			scene->deserialize(input_blob);
+			if (m_editor->isGameMode()) scene->startGame();
 		}
 		g_log_info.log("Editor") << "Finished reloading plugin.";
 	}
@@ -1718,20 +1718,6 @@ public:
 		while (parser.next())
 		{
 			if (parser.currentEquals("-no_sleep_inactive")) return false;
-		}
-		return true;
-	}
-
-
-	bool vSync()
-	{
-		char cmd_line[2048];
-		getCommandLine(cmd_line, lengthOf(cmd_line));
-
-		CommandLineParser parser(cmd_line);
-		while (parser.next())
-		{
-			if (parser.currentEquals("-no_vsync")) return false;
 		}
 		return true;
 	}

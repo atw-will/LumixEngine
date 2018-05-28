@@ -2381,7 +2381,7 @@ struct RenderInterfaceImpl LUMIX_FINAL : public RenderInterface
 		copyMemory(vertex_buffer.data, vertices, vertices_count * renderer.getBasicVertexDecl().getStride());
 		copyMemory(index_buffer.data, indices, indices_count * sizeof(u16));
 
-		u64 flags = BGFX_STATE_DEPTH_TEST_LEQUAL;
+		u64 flags = m_shader->m_render_states;
 		if (lines) flags |= BGFX_STATE_PT_LINES;
 		m_pipeline.render(vertex_buffer,
 			index_buffer,
@@ -2607,7 +2607,7 @@ struct EditorUIRenderPlugin LUMIX_FINAL : public StudioApp::GUIPlugin
 		float height = ImGui::GetIO().DisplaySize.y;
 		float bottom = height + top;
 		Matrix ortho;
-		ortho.setOrtho(left, right, bottom, top, -1.0f, 1.0f, bgfx::getCaps()->homogeneousDepth);
+		ortho.setOrtho(left, right, bottom, top, -1.0f, 1.0f, bgfx::getCaps()->homogeneousDepth, true);
 		if (framebuffer && (framebuffer->getWidth() != int(width + 0.5f) || framebuffer->getHeight() != int(height + 0.5f)))
 		{
 			framebuffer->resize((int)width, (int)height);
@@ -2703,7 +2703,7 @@ struct EditorUIRenderPlugin LUMIX_FINAL : public StudioApp::GUIPlugin
 			
 			ShaderInstance& shader_instance = material->getShaderInstance();
 			bgfx::setStencil(BGFX_STENCIL_NONE, BGFX_STENCIL_NONE);
-			bgfx::setState(BGFX_STATE_RGB_WRITE | BGFX_STATE_ALPHA_WRITE | BGFX_STATE_DEPTH_WRITE | render_states);
+			bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z | render_states);
 			bgfx::setVertexBuffer(0, m_vertex_buffer, m_vb_offset, num_vertices);
 			u32 first_index = elem_offset + m_ib_offset;
 			bgfx::setIndexBuffer(m_index_buffer, first_index, pcmd->ElemCount);

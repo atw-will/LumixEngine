@@ -32,6 +32,7 @@
 #include "renderer/texture.h"
 #include <cfloat>
 #include <cmath>
+#include <algorithm>
 
 
 namespace Lumix
@@ -991,8 +992,8 @@ public:
 			Vec3 up = rot.rotate({ 0, -1, 0 }) * scale;
 			if (text.m_flags.isSet(TextMesh::CAMERA_ORIENTED))
 			{
-				right = cam_right;
-				up = cam_up;
+				right = cam_right * scale;
+				up = cam_up * scale;
 			}
 			u32 color = text.color;
 			Vec2 text_size = font->CalcTextSizeA((float)text.getFontSize(), FLT_MAX, 0, str);
@@ -2671,7 +2672,7 @@ public:
 
 	ModelInstance* getModelInstances() override
 	{
-		return &m_model_instances[0];
+		return m_model_instances.empty() ? nullptr : &m_model_instances[0];
 	}
 
 
@@ -3612,10 +3613,24 @@ public:
 						info.depth = squared_distance;
 					}
 				}
+				if (!subinfos.empty())
+				{
+					PROFILE_BLOCK("Sort");
+					MeshInstance* begin = &subinfos[0];
+					MeshInstance* end = begin + subinfos.size();
+
+					auto cmp = [](const MeshInstance& a, const MeshInstance& b) -> bool {
+						if (a.mesh != b.mesh) return a.mesh < b.mesh;
+						return (a.depth < b.depth);
+					};
+					std::sort(begin, end, cmp);
+				}
 			}, &job_storage[subresult_index], &jobs[subresult_index], nullptr);
 		}
 		JobSystem::runJobs(jobs, results.size(), &counter);
 		JobSystem::wait(&counter);
+
+		
 
 		return m_temporary_infos;
 	}
@@ -3665,11 +3680,12 @@ public:
 				camera.ortho_size,
 				camera.near,
 				camera.far,
-				is_homogenous_depth);
+				is_homogenous_depth,
+				true);
 		}
 		else
 		{
-			mtx.setPerspective(camera.fov, ratio, camera.near, camera.far, is_homogenous_depth);
+			mtx.setPerspective(camera.fov, ratio, camera.near, camera.far, is_homogenous_depth, true);
 		}
 		return mtx;
 	}
@@ -4253,6 +4269,7 @@ public:
 			{
 				terrain_hit.m_component_type = TERRAIN_TYPE;
 				terrain_hit.m_entity = terrain->getEntity();
+				terrain_hit.m_mesh = nullptr;
 				hit = terrain_hit;
 			}
 		}

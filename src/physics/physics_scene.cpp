@@ -2443,7 +2443,8 @@ struct PhysicsSceneImpl LUMIX_FINAL : public PhysicsScene
 			LuaWrapper::push(L, hit.entity != INVALID_ENTITY);
 			LuaWrapper::push(L, hit.entity);
 			LuaWrapper::push(L, hit.position);
-			return 3;
+			LuaWrapper::push(L, hit.normal);
+			return 4;
 		}
 		LuaWrapper::push(L, false);
 		return 1;
@@ -4979,7 +4980,10 @@ struct PhysicsSceneImpl LUMIX_FINAL : public PhysicsScene
 
 	void putToSleep(Entity entity) override
 	{
-		auto* actor = m_actors[entity];
+		int key = m_actors.find(entity);
+		if (key < 0) return;
+		RigidActor* actor = m_actors.at(key);
+
 		if (actor->dynamic_type != DynamicType::DYNAMIC)
 		{
 			g_log_warning.log("Physics") << "Trying to put static object to sleep";
@@ -4994,8 +4998,10 @@ struct PhysicsSceneImpl LUMIX_FINAL : public PhysicsScene
 
 	void applyForceToActor(Entity entity, const Vec3& force) override
 	{
-		RigidActor* actor = m_actors[entity];
-		if (!actor) return;
+		int key = m_actors.find(entity);
+		if (key < 0) return;
+		RigidActor* actor = m_actors.at(key);
+
 		if (actor->dynamic_type != DynamicType::DYNAMIC)
 		{
 			g_log_warning.log("Physics") << "Trying to apply force to static object #" << entity.index;
@@ -5010,8 +5016,9 @@ struct PhysicsSceneImpl LUMIX_FINAL : public PhysicsScene
 
 	void applyImpulseToActor(Entity entity, const Vec3& impulse) override
 	{
-		RigidActor* actor = m_actors[entity];
-		if (!actor) return;
+		int key = m_actors.find(entity);
+		if (key < 0) return;
+		RigidActor* actor = m_actors.at(key);
 		if (actor->dynamic_type != DynamicType::DYNAMIC)
 		{
 			g_log_warning.log("Physics") << "Trying to apply force to static object #" << entity.index;

@@ -173,7 +173,8 @@ struct BillboardSceneData
 			ortho_size,
 			0.0001f,
 			10000.0f,
-			false /* we do not care for z value, so both true and false are correct*/);
+			false /* we do not care for z value, so both true and false are correct*/,
+			true);
 
 		mvp.setTranslation(position);
 		mvp.fastInverse();
@@ -2688,6 +2689,7 @@ void ImportAssetDialog::onMaterialsGUI()
 			ImGui::Checkbox("Import material", &mat.import);
 			ImGui::Checkbox("Alpha cutout material", &mat.alpha_cutout);
 
+			ImGui::PushTextWrapPos();
 			ImGui::Columns(4);
 			ImGui::Text("Path");
 			ImGui::NextColumn();
@@ -2720,6 +2722,7 @@ void ImportAssetDialog::onMaterialsGUI()
 				ImGui::NextColumn();
 			}
 			ImGui::Columns();
+			ImGui::PopTextWrapPos();
 
 			ImGui::TreePop();
 		}

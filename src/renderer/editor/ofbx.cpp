@@ -191,15 +191,15 @@ static Matrix getRotationMatrix(const Vec3& euler, RotationOrder order)
 }
 
 
-static double fbxTimeToSeconds(u64 value)
+static double fbxTimeToSeconds(i64 value)
 {
 	return double(value) / 46186158000L;
 }
 
 
-static u64 secondsToFbxTime(double value)
+static i64 secondsToFbxTime(double value)
 {
-	return u64(value * 46186158000L);
+	return i64(value * 46186158000L);
 }
 
 
@@ -241,6 +241,19 @@ u64 DataView::toU64() const
 		assert(end - begin == sizeof(u64));
 		return *(u64*)begin;
 	}
+	static_assert(sizeof(unsigned long long) >= sizeof(u64), "can't use strtoull");
+	return strtoull((const char*)begin, nullptr, 10);
+}
+
+
+i64 DataView::toI64() const
+{
+	if (is_binary)
+	{
+		assert(end - begin == sizeof(i64));
+		return *(i64*)begin;
+	}
+	static_assert(sizeof(long long) >= sizeof(i64), "can't use atoll");
 	return atoll((const char*)begin);
 }
 
@@ -329,6 +342,8 @@ struct Property : IElementProperty
 	bool getValues(float* values, int max_size) const override { return parseArrayRaw(*this, values, max_size); }
 
 	bool getValues(u64* values, int max_size) const override { return parseArrayRaw(*this, values, max_size); }
+	
+	bool getValues(i64* values, int max_size) const override { return parseArrayRaw(*this, values, max_size); }
 
 	bool getValues(int* values, int max_size) const override { return parseArrayRaw(*this, values, max_size); }
 
@@ -1098,7 +1113,7 @@ struct GeometryImpl : Geometry
 
 	std::vector<Vec3> vertices;
 	std::vector<Vec3> normals;
-	std::vector<Vec2> uvs;
+	std::vector<Vec2> uvs[s_uvs_max];
 	std::vector<Vec4> colors;
 	std::vector<Vec3> tangents;
 	std::vector<int> materials;
@@ -1118,7 +1133,7 @@ struct GeometryImpl : Geometry
 	int getVertexCount() const override { return (int)vertices.size(); }
 	const Vec3* getVertices() const override { return &vertices[0]; }
 	const Vec3* getNormals() const override { return normals.empty() ? nullptr : &normals[0]; }
-	const Vec2* getUVs() const override { return uvs.empty() ? nullptr : &uvs[0]; }
+	const Vec2* getUVs(int index = 0) const override { return index < 0 || index >= s_uvs_max || uvs[index].empty() ? nullptr : &uvs[index][0]; }
 	const Vec4* getColors() const override { return colors.empty() ? nullptr : &colors[0]; }
 	const Vec3* getTangents() const override { return tangents.empty() ? nullptr : &tangents[0]; }
 	const Skin* getSkin() const override { return skin; }
@@ -1290,10 +1305,10 @@ struct AnimationCurveImpl : AnimationCurve
 	}
 
 	int getKeyCount() const override { return (int)times.size(); }
-	const u64* getKeyTime() const override { return &times[0]; }
+	const i64* getKeyTime() const override { return &times[0]; }
 	const float* getKeyValue() const override { return &values[0]; }
 
-	std::vector<u64> times;
+	std::vector<i64> times;
 	std::vector<float> values;
 	Type getType() const override { return Type::ANIMATION_CURVE; }
 };
@@ -1461,12 +1476,12 @@ struct AnimationCurveNodeImpl : AnimationCurveNode
 
 	Vec3 getNodeLocalTransform(double time) const override
 	{
-		u64 fbx_time = secondsToFbxTime(time);
+		i64 fbx_time = secondsToFbxTime(time);
 
-		auto getCoord = [](const Curve& curve, u64 fbx_time) {
+		auto getCoord = [](const Curve& curve, i64 fbx_time) {
 			if (!curve.curve) return 0.0f;
 
-			const u64* times = curve.curve->getKeyTime();
+			const i64* times = curve.curve->getKeyTime();
 			const float* values = curve.curve->getKeyValue();
 			int count = curve.curve->getKeyCount();
 
@@ -1712,7 +1727,17 @@ template <> const char* fromString<int>(const char* str, const char* end, int* v
 
 template <> const char* fromString<u64>(const char* str, const char* end, u64* val)
 {
-	*val = atol(str);
+	*val = strtoull(str, nullptr, 10);
+	const char* iter = str;
+	while (iter < end && *iter != ',') ++iter;
+	if (iter < end) ++iter; // skip ','
+	return (const char*)iter;
+}
+
+
+template <> const char* fromString<i64>(const char* str, const char* end, i64* val)
+{
+	*val = atoll(str);
 	const char* iter = str;
 	while (iter < end && *iter != ',') ++iter;
 	if (iter < end) ++iter; // skip ','
@@ -2121,19 +2146,30 @@ static OptionalError<Object*> parseGeometry(const Scene& scene, const Element& e
 	}
 
 	const Element* layer_uv_element = findChild(element, "LayerElementUV");
-	if (layer_uv_element)
-	{
-		std::vector<Vec2> tmp;
-		std::vector<int> tmp_indices;
-		GeometryImpl::VertexDataMapping mapping;
-		if (!parseVertexData(*layer_uv_element, "UV", "UVIndex", &tmp, &tmp_indices, &mapping)) return Error("Invalid UVs");
-		if (!tmp.empty())
-		{
-			geom->uvs.resize(tmp_indices.empty() ? tmp.size() : tmp_indices.size());
-			splat(&geom->uvs, mapping, tmp, tmp_indices, original_indices);
-			remap(&geom->uvs, to_old_indices);
-		}
-	}
+    while (layer_uv_element)
+    {
+        const int uv_index = layer_uv_element->first_property ? layer_uv_element->first_property->getValue().toInt() : 0;
+        if (uv_index >= 0 && uv_index < Geometry::s_uvs_max)
+        {
+            std::vector<Vec2>& uvs = geom->uvs[uv_index];
+
+            std::vector<Vec2> tmp;
+            std::vector<int> tmp_indices;
+            GeometryImpl::VertexDataMapping mapping;
+            if (!parseVertexData(*layer_uv_element, "UV", "UVIndex", &tmp, &tmp_indices, &mapping)) return Error("Invalid UVs");
+            if (!tmp.empty())
+            {
+                uvs.resize(tmp_indices.empty() ? tmp.size() : tmp_indices.size());
+                splat(&uvs, mapping, tmp, tmp_indices, original_indices);
+                remap(&uvs, to_old_indices);
+            }
+        }
+
+        do
+        {
+            layer_uv_element = layer_uv_element->sibling;
+        } while (layer_uv_element && layer_uv_element->id != "LayerElementUV");
+    }
 
 	const Element* layer_tangent_element = findChild(element, "LayerElementTangents");
 	if (layer_tangent_element)
@@ -2288,8 +2324,8 @@ static bool parseTakes(Scene* scene)
 					return false;
 				}
 
-				take.local_time_from = fbxTimeToSeconds(local_time->first_property->value.toU64());
-				take.local_time_to = fbxTimeToSeconds(local_time->first_property->next->value.toU64());
+				take.local_time_from = fbxTimeToSeconds(local_time->first_property->value.toI64());
+				take.local_time_to = fbxTimeToSeconds(local_time->first_property->next->value.toI64());
 			}
 			const Element* reference_time = findChild(*object, "ReferenceTime");
 			if (reference_time)
@@ -2300,8 +2336,8 @@ static bool parseTakes(Scene* scene)
 					return false;
 				}
 
-				take.reference_time_from = fbxTimeToSeconds(reference_time->first_property->value.toU64());
-				take.reference_time_to = fbxTimeToSeconds(reference_time->first_property->next->value.toU64());
+				take.reference_time_from = fbxTimeToSeconds(reference_time->first_property->value.toI64());
+				take.reference_time_to = fbxTimeToSeconds(reference_time->first_property->next->value.toI64());
 			}
 
 			scene->m_take_infos.push_back(take);

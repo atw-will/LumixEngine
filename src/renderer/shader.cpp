@@ -8,6 +8,7 @@
 #include "engine/resource_manager_base.h"
 #include "renderer/renderer.h"
 #include "renderer/shader_manager.h"
+#include "renderer/texture.h"
 #include <bgfx/bgfx.h>
 #include <lua.hpp>
 #include <lauxlib.h>
@@ -169,11 +170,22 @@ static Shader* getShader(lua_State* L)
 }
 
 
+static void default_texture(lua_State* state, const char* path)
+{
+	Shader* shader = getShader(state);
+	if (!shader) return;
+	if (shader->m_texture_slot_count == 0) return;
+	Shader::TextureSlot& slot = shader->m_texture_slots[shader->m_texture_slot_count - 1];
+	ResourceManagerBase* texture_manager = shader->getResourceManager().getOwner().get(Texture::TYPE);
+	slot.default_texture = (Texture*)texture_manager->load(Path(path));
+}
+
+
 static void texture_slot(lua_State* state, const char* name, const char* uniform)
 {
-	auto* shader = getShader(state);
+	Shader* shader = getShader(state);
 	if (!shader) return;
-	auto& slot = shader->m_texture_slots[shader->m_texture_slot_count];
+	Shader::TextureSlot& slot = shader->m_texture_slots[shader->m_texture_slot_count];
 	copyString(slot.name, name);
 	slot.uniform_handle = bgfx::createUniform(uniform, bgfx::UniformType::Int1);
 	copyString(slot.uniform, uniform);
@@ -315,7 +327,7 @@ static void depth_test(lua_State* L, bool enabled)
 	if (!shader) return;
 	if (enabled)
 	{
-		shader->m_render_states |= BGFX_STATE_DEPTH_TEST_LEQUAL;
+		shader->m_render_states |= BGFX_STATE_DEPTH_TEST_GEQUAL;
 	}
 	else
 	{
@@ -381,6 +393,7 @@ static void registerFunctions(Shader* shader, ShaderCombinations* combinations, 
 	registerCFunction(L, "vs", &LuaWrapper::wrap<decltype(&vs), vs>);
 	registerCFunction(L, "depth_test", &LuaWrapper::wrap<decltype(&depth_test), depth_test>);
 	registerCFunction(L, "alpha_blending", &LuaWrapper::wrap<decltype(&alpha_blending), alpha_blending>);
+	registerCFunction(L, "default_texture", &LuaWrapper::wrap<decltype(&default_texture), default_texture>);
 	registerCFunction(L, "texture_slot", &LuaWrapper::wrap<decltype(&texture_slot), texture_slot>);
 	registerCFunction(L, "texture_define", &LuaWrapper::wrap<decltype(&texture_define), texture_define>);
 	registerCFunction(L, "uniform", &LuaWrapper::wrap<decltype(&uniform), uniform>);
@@ -392,7 +405,7 @@ bool Shader::load(FS::IFile& file)
 	lua_State* L = luaL_newstate();
 	luaL_openlibs(L);
 	registerFunctions(this, &m_combintions, &getRenderer(), L);
-	m_render_states = BGFX_STATE_DEPTH_TEST_LEQUAL;
+	m_render_states = BGFX_STATE_DEPTH_TEST_GEQUAL;
 
 	bool errors = luaL_loadbuffer(L, (const char*)file.getBuffer(), file.size(), "") != LUA_OK;
 	errors = errors || lua_pcall(L, 0, 0, 0) != LUA_OK;
@@ -431,6 +444,13 @@ void Shader::unload()
 		{
 			bgfx::destroy(m_texture_slots[i].uniform_handle);
 		}
+		if (m_texture_slots[i].default_texture)
+		{
+			Texture* t = m_texture_slots[i].default_texture;
+			t->getResourceManager().unload(*t);
+			m_texture_slots[i].default_texture = nullptr;
+		}
+
 		m_texture_slots[i].uniform_handle = BGFX_INVALID_HANDLE;
 	}
 	m_texture_slot_count = 0;
