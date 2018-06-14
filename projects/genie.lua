@@ -17,6 +17,8 @@ local build_gui = _ACTION == "vs2017"
 local build_steam = false
 local build_game = false
 local working_dir = nil
+local debug_args = nil
+local release_args = nil
 local plugins = {}
 local embed_resources = false
 build_studio_callbacks = {}
@@ -74,6 +76,16 @@ newoption {
 }
 
 newoption {
+	trigger = "debug-args",
+	description = "Arguments passed to Studio in debug mode."
+}
+
+newoption {
+	trigger = "release-args",
+	description = "Arguments passed to Studio in release mode."
+}
+
+newoption {
 	trigger = "no-studio",
 	description = "Do not build Studio."
 }
@@ -97,6 +109,14 @@ end
 
 if _OPTIONS["working-dir"] then
 	working_dir = _OPTIONS["working-dir"]
+end
+
+if _OPTIONS["debug-args"] then
+	debug_args = _OPTIONS["debug-args"]
+end
+
+if _OPTIONS["release-args"] then
+	release_args = _OPTIONS["release-args"]
 end
 
 if _OPTIONS["no-physics"] then
@@ -161,7 +181,7 @@ newaction {
 		for _, test in ipairs(render_tests) do
 			os.execute([[xcopy /I /Y /E "..\..\lumixengine_data\unit_tests\render_tests\]] .. test ..[[" "..\..\lumixengine_data\universes\]] .. test .. [["]])
 			os.execute([[cd ..\..\lumixengine_data\ && bin\studio.exe -run_script unit_tests\render_tests\update_tests.lua -open ]] .. test)
-			os.execute([[cp "..\..\lumixengine_data\universes\]] .. test .. [[.unv"  "..\..\lumixengine_data\unit_tests\render_tests"]])
+			os.execute([[cd ..\..\lumixengine_data\ && copy /Y universes\]] .. test .. [[.unv  unit_tests\render_tests\]] .. test .. [[.unv]])
 			os.execute([[rmdir /S /Q "..\..\lumixengine_data\universes\]] .. test .. [["]])
 			os.execute([[del /Q "..\..\lumixengine_data\universes\]] .. test .. [[.unv"]])
 		end
@@ -862,6 +882,17 @@ if build_studio then
 	project "studio"
 		kind "WindowedApp"
 
+		if debug_args then
+			configuration { "Debug" }
+				debugargs { debug_args }
+			configuration {}
+		end
+		if release_args then
+			configuration { "RelWithDebInfo" }
+				debugargs { release_args }
+			configuration {}
+		end
+		
 		if build_game then
 			debugdir ("../../" .. build_game)
 		elseif working_dir then

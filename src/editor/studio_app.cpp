@@ -2,6 +2,7 @@
 #include "asset_browser.h"
 #include "audio/audio_scene.h"
 #include "audio/clip_manager.h"
+#include "editor/file_system_watcher.h"
 #include "editor/gizmo.h"
 #include "editor/prefab_system.h"
 #include "editor/render_interface.h"
@@ -43,7 +44,7 @@ namespace Lumix
 {
 
 
-struct LuaPlugin : public StudioApp::IPlugin
+struct LuaPlugin : public StudioApp::GUIPlugin
 {
 	LuaPlugin(StudioApp& app, const char* src, const char* filename)
 		: editor(app.getWorldEditor())
@@ -151,6 +152,7 @@ public:
 		, m_is_pack_data_dialog_open(false)
 		, m_editor(nullptr)
 		, m_settings(*this)
+		, m_gui_plugins(m_allocator)
 		, m_plugins(m_allocator)
 		, m_add_cmp_plugins(m_allocator)
 		, m_component_labels(m_allocator)
@@ -230,6 +232,8 @@ public:
 
 	~StudioAppImpl()
 	{
+		if(m_watched_plugin.watcher) FileSystemWatcher::destroy(m_watched_plugin.watcher);
+
 		saveSettings();
 		unloadIcons();
 
@@ -242,11 +246,13 @@ public:
 
 		destroyAddCmpTreeNode(m_add_cmp_root.child);
 
-		for (auto* plugin : m_plugins)
+		for (auto* i : m_plugins)
 		{
-			LUMIX_DELETE(m_editor->getAllocator(), plugin);
+			LUMIX_DELETE(m_editor->getAllocator(), i);
 		}
 		m_plugins.clear();
+		PrefabSystem::destroyAssetBrowserPlugin(*this);
+		ASSERT(m_gui_plugins.empty());
 
 		for (auto* i : m_add_cmp_plugins)
 		{
@@ -562,7 +568,7 @@ public:
 			m_property_grid->onGUI();
 			onEntityListGUI();
 			onSaveAsDialogGUI();
-			for (auto* plugin : m_plugins)
+			for (auto* plugin : m_gui_plugins)
 			{
 				plugin->onWindowGUI();
 			}
@@ -571,7 +577,7 @@ public:
 		}
 		ImGui::PopFont();
 		ImGui::Render();
-		for (auto* plugin : m_plugins)
+		for (auto* plugin : m_gui_plugins)
 		{
 			plugin->guiEndFrame();
 		}
@@ -580,6 +586,8 @@ public:
 	void update()
 	{
 		PROFILE_FUNCTION();
+		if (m_watched_plugin.reload_request) tryReloadPlugin();
+
 		guiBeginFrame();
 
 		float time_delta = m_editor->getEngine().getLastTimeDelta();
@@ -608,7 +616,7 @@ public:
 			m_editor->toggleGameMode();
 		}
 
-		for (auto* plugin : m_plugins)
+		for (auto* plugin : m_gui_plugins)
 		{
 			plugin->update(time_delta);
 		}
@@ -627,6 +635,7 @@ public:
 		SDL_GetWindowSize(m_window, &w, &h);
 		ImVec2 size((float)w, (float)h);
 		ImGui::SetNextWindowSize(size);
+		ImGui::SetNextWindowPos({ 0, 0 }, ImGuiCond_FirstUseEver);
 		if (ImGui::Begin("Welcome", nullptr, flags))
 		{
 			ImGui::Text("Welcome to Lumix Studio");
@@ -805,9 +814,9 @@ public:
 	}
 
 
-	IPlugin* getFocusedPlugin()
+	GUIPlugin* getFocusedPlugin()
 	{
-		for(IPlugin* plugin : m_plugins)
+		for(GUIPlugin* plugin : m_gui_plugins)
 		{
 			if(plugin->hasFocus()) return plugin;
 		}
@@ -926,6 +935,13 @@ public:
 		{
 			m_editor->saveUndoStack(Path(filename));
 		}
+	}
+
+
+	void removeAction(Action* action) override
+	{
+		m_actions.eraseItem(action);
+		m_window_actions.eraseItem(action);
 	}
 
 
@@ -1252,14 +1268,13 @@ public:
 		getEntityListDisplayName(*m_editor, buffer, sizeof(buffer), entity);
 		bool selected = selected_entities.indexOf(entity) >= 0;
 		ImGui::PushID(entity.index);
-		if (ImGui::Selectable(buffer, &selected))
-		{
-			m_editor->selectEntities(&entity, 1, true);
-		}
-		if (ImGui::IsMouseReleased(1) && ImGui::IsItemHovered())
-		{
-			ImGui::OpenPopup("entity_context_menu");
-		}
+		ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_AllowItemOverlap;
+		bool has_child = universe->getFirstChild(entity).isValid();
+		if (!has_child) flags = ImGuiTreeNodeFlags_Leaf;
+		if (selected) flags |= ImGuiTreeNodeFlags_Selected;
+		bool node_open = ImGui::TreeNodeEx(buffer, flags);
+		if (ImGui::IsItemClicked(0)) m_editor->selectEntities(&entity, 1, true);
+		if (ImGui::IsMouseReleased(1) && ImGui::IsItemHovered()) ImGui::OpenPopup("entity_context_menu");
 		if (ImGui::BeginPopup("entity_context_menu"))
 		{
 			if (ImGui::MenuItem("Create child"))
@@ -1288,6 +1303,7 @@ public:
 				if (dropped_entity != entity)
 				{
 					m_editor->makeParent(entity, dropped_entity);
+					if (node_open) ImGui::TreePop();
 					return;
 				}
 			}
@@ -1295,12 +1311,14 @@ public:
 			ImGui::EndDragDropTarget();
 		}
 
-		ImGui::Indent();
-		for (Entity e = universe->getFirstChild(entity); e.isValid(); e = universe->getNextSibling(e))
+		if (node_open)
 		{
-			showHierarchy(e, selected_entities);
+			for (Entity e = universe->getFirstChild(entity); e.isValid(); e = universe->getNextSibling(e))
+			{
+				showHierarchy(e, selected_entities);
+			}
+			ImGui::TreePop();
 		}
-		ImGui::Unindent();
 	}
 
 
@@ -1334,6 +1352,7 @@ public:
 						char buffer[1024];
 						getEntityListDisplayName(*m_editor, buffer, sizeof(buffer), e);
 						if (stristr(buffer, filter) == nullptr) continue;
+						ImGui::PushID(e.index);
 						bool selected = entities.indexOf(e) >= 0;
 						if (ImGui::Selectable(buffer, &selected))
 						{
@@ -1345,6 +1364,7 @@ public:
 							ImGui::SetDragDropPayload("entity", &e, sizeof(e));
 							ImGui::EndDragDropSource();
 						}
+						ImGui::PopID();
 					}
 				}
 				ImGui::PopItemWidth();
@@ -1397,7 +1417,7 @@ public:
 	void initIMGUI()
 	{
 		ImGuiIO& io = ImGui::GetIO();
-		io.NavFlags |= ImGuiNavFlags_EnableKeyboard;
+		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 		float ddpi;
 		float font_scale = 1;
 		if (SDL_GetDisplayDPI(0, &ddpi, nullptr, nullptr) == 0) font_scale = ddpi / 96;
@@ -1525,6 +1545,42 @@ public:
 	}
 
 
+	static bool copyPlugin(const char* src, int iteration, char(&out)[MAX_PATH_LENGTH])
+	{
+		char tmp_path[MAX_PATH_LENGTH];
+		getExecutablePath(tmp_path, lengthOf(tmp_path));
+		StaticString<MAX_PATH_LENGTH> copy_path;
+		PathUtils::getDir(copy_path.data, lengthOf(copy_path.data), tmp_path);
+		copy_path << "plugins/" << iteration;
+		PlatformInterface::makePath(copy_path);
+		PathUtils::getBasename(tmp_path, lengthOf(tmp_path), src);
+		copy_path << "/" << tmp_path << "." << getPluginExtension();
+		#ifdef _WIN32
+			StaticString<MAX_PATH_LENGTH> src_pdb(src);
+			StaticString<MAX_PATH_LENGTH> dest_pdb(copy_path);
+			if (PathUtils::replaceExtension(dest_pdb.data, "pdb")
+				&& PathUtils::replaceExtension(src_pdb.data, "pda"))
+			{
+				PlatformInterface::deleteFile(dest_pdb);
+				if (!copyFile(src_pdb, dest_pdb))
+				{
+					copyString(out, src);
+					return false;
+				}
+			}
+		#endif
+		
+		PlatformInterface::deleteFile(copy_path);
+		if (!copyFile(src, copy_path))
+		{
+			copyString(out, src);
+			return false;
+		}
+		copyString(out, copy_path);
+		return true;
+	}
+
+
 	void loadUserPlugins()
 	{
 		char cmd_line[2048];
@@ -1537,15 +1593,121 @@ public:
 			if (!parser.currentEquals("-plugin")) continue;
 			if (!parser.next()) break;
 
-			char tmp[MAX_PATH_LENGTH];
-			parser.getCurrent(tmp, lengthOf(tmp));
-			bool loaded = plugin_manager.load(tmp) != nullptr;
-			if (!loaded)
+			char src[MAX_PATH_LENGTH];
+			parser.getCurrent(src, lengthOf(src));
+
+			bool is_full_path = findSubstring(src, ".") != nullptr;
+			Lumix::IPlugin* loaded_plugin;
+			if (is_full_path)
 			{
-				g_log_error.log("Editor") << "Could not load plugin " << tmp << " requested by command line";
+				char copy_path[MAX_PATH_LENGTH];
+				copyPlugin(src, 0, copy_path);
+				loaded_plugin = plugin_manager.load(copy_path);
+			}
+			else
+			{
+				loaded_plugin = plugin_manager.load(src);
+			}
+
+			if (!loaded_plugin)
+			{
+				g_log_error.log("Editor") << "Could not load plugin " << src << " requested by command line";
+			}
+			else if (is_full_path && !m_watched_plugin.watcher)
+			{
+				char dir[MAX_PATH_LENGTH];
+				char basename[MAX_PATH_LENGTH];
+				PathUtils::getBasename(basename, lengthOf(basename), src);
+				m_watched_plugin.basename = basename;
+				PathUtils::getDir(dir, lengthOf(dir), src);
+				m_watched_plugin.watcher = FileSystemWatcher::create(dir, m_allocator);
+				m_watched_plugin.watcher->getCallback().bind<StudioAppImpl, &StudioAppImpl::onPluginChanged>(this);
+				m_watched_plugin.dir = dir;
+				m_watched_plugin.plugin = loaded_plugin;
 			}
 		}
 	}
+
+
+	static const char* getPluginExtension()
+	{
+		const char* ext =
+			#ifdef _WIN32
+				"dll";
+			#elif defined __linux__
+				"so";
+			#else 
+				#error Unknown platform
+			#endif
+		return ext;
+	}
+
+
+	void onPluginChanged(const char* path)
+	{
+		const char* ext = getPluginExtension();
+		if (!PathUtils::hasExtension(path, ext)
+			#ifdef _WIN32
+				&& !PathUtils::hasExtension(path, "pda")
+			#endif
+		) return;
+
+		char basename[MAX_PATH_LENGTH];
+		PathUtils::getBasename(basename, lengthOf(basename), path);
+		if (!equalIStrings(basename, m_watched_plugin.basename)) return;
+
+		m_watched_plugin.reload_request = true;
+	}
+
+
+	void tryReloadPlugin()
+	{
+		m_watched_plugin.reload_request = false;
+
+		StaticString<MAX_PATH_LENGTH> src(m_watched_plugin.dir, m_watched_plugin.basename, ".", getPluginExtension());
+		char copy_path[MAX_PATH_LENGTH];
+		++m_watched_plugin.iteration;
+
+		if (!copyPlugin(src, m_watched_plugin.iteration, copy_path)) return;
+
+		g_log_info.log("Editor") << "Trying to reload plugin " << m_watched_plugin.basename;
+
+		OutputBlob blob(m_allocator);
+		blob.reserve(16 * 1024);
+		PluginManager& plugin_manager = m_editor->getEngine().getPluginManager();
+		void* lib = plugin_manager.getLibrary(m_watched_plugin.plugin);
+
+		Universe* universe = m_editor->getUniverse();
+		for (IScene* scene : universe->getScenes())
+		{
+			if (&scene->getPlugin() != m_watched_plugin.plugin) continue;
+			if (m_editor->isGameMode()) scene->stopGame();
+			scene->serialize(blob);
+			universe->removeScene(scene);
+			scene->getPlugin().destroyScene(scene);
+		}
+		plugin_manager.unload(m_watched_plugin.plugin);
+
+		// TODO try to delete the old version
+
+		m_watched_plugin.plugin = plugin_manager.load(copy_path);
+		if (!m_watched_plugin.plugin)
+		{
+			g_log_error.log("Editor") << "Failed to load plugin " << copy_path << ". Reload failed.";
+			return;
+		}
+
+		InputBlob input_blob(blob);
+		m_watched_plugin.plugin->createScenes(*universe);
+		for (IScene* scene : universe->getScenes())
+		{
+			if (&scene->getPlugin() != m_watched_plugin.plugin) continue;
+			scene->deserialize(input_blob);
+			if (m_editor->isGameMode()) scene->startGame();
+		}
+		g_log_info.log("Editor") << "Finished reloading plugin.";
+	}
+
 
 	bool shouldSleepWhenInactive()
 	{
@@ -1556,20 +1718,6 @@ public:
 		while (parser.next())
 		{
 			if (parser.currentEquals("-no_sleep_inactive")) return false;
-		}
-		return true;
-	}
-
-
-	bool vSync()
-	{
-		char cmd_line[2048];
-		getCommandLine(cmd_line, lengthOf(cmd_line));
-
-		CommandLineParser parser(cmd_line);
-		while (parser.next())
-		{
-			if (parser.currentEquals("-no_vsync")) return false;
 		}
 		return true;
 	}
@@ -1613,9 +1761,9 @@ public:
 	}
 
 
-	IPlugin* getPlugin(const char* name) override
+	GUIPlugin* getPlugin(const char* name) override
 	{
-		for (auto* i : m_plugins)
+		for (auto* i : m_gui_plugins)
 		{
 			if (equalStrings(i->getName(), name)) return i;
 		}
@@ -1626,7 +1774,13 @@ public:
 	void addPlugin(IPlugin& plugin) override
 	{
 		m_plugins.push(&plugin);
-		for (auto* i : m_plugins)
+	}
+
+
+	void addPlugin(GUIPlugin& plugin) override
+	{
+		m_gui_plugins.push(&plugin);
+		for (auto* i : m_gui_plugins)
 		{
 			i->pluginAdded(plugin);
 			plugin.pluginAdded(*i);
@@ -1634,25 +1788,29 @@ public:
 	}
 
 
-	void removePlugin(IPlugin& plugin) override
+	void removePlugin(GUIPlugin& plugin) override
 	{
-		m_plugins.eraseItemFast(&plugin);
+		m_gui_plugins.eraseItemFast(&plugin);
 	}
 
 
 	void setStudioApp()
 	{
-		m_editor->getPrefabSystem().setStudioApp(*this);
 		#ifdef STATIC_PLUGINS
 			StudioApp::StaticPluginRegister::create(*this);
 		#else
 			auto& plugin_manager = m_editor->getEngine().getPluginManager();
 			for (auto* lib : plugin_manager.getLibraries())
 			{
-				auto* f = (void (*)(StudioApp&))getLibrarySymbol(lib, "setStudioApp");
-				if (f) f(*this);
+				auto* f = (StudioApp::IPlugin* (*)(StudioApp&))getLibrarySymbol(lib, "setStudioApp");
+				if (f)
+				{
+					StudioApp::IPlugin* plugin = f(*this);
+					addPlugin(*plugin);
+				}
 			}
 		#endif
+		PrefabSystem::createAssetBrowserPlugin(*this, m_editor->getPrefabSystem());
 	}
 
 
@@ -2193,7 +2351,7 @@ public:
 			}
 		}
 
-		for (IPlugin* plugin : m_plugins)
+		for (GUIPlugin* plugin : m_gui_plugins)
 		{
 			if (!plugin->packData(m_pack.dest_dir))
 			{
@@ -2364,7 +2522,7 @@ public:
 				}
 				break;
 				case SDL_DROPFILE:
-					for (IPlugin* plugin : m_plugins)
+					for (GUIPlugin* plugin : m_gui_plugins)
 					{
 						if (plugin->onDropFile(event.drop.file)) break;
 					}
@@ -2467,7 +2625,7 @@ public:
 	void checkShortcuts()
 	{
 		if (ImGui::IsAnyItemActive()) return;
-		IPlugin* plugin = getFocusedPlugin();
+		GUIPlugin* plugin = getFocusedPlugin();
 
 		int key_count;
 		auto* state = SDL_GetKeyboardState(&key_count);
@@ -2555,6 +2713,7 @@ public:
 	Array<Action*> m_actions;
 	Array<Action*> m_window_actions;
 	Array<Action*> m_toolbar_actions;
+	Array<GUIPlugin*> m_gui_plugins;
 	Array<IPlugin*> m_plugins;
 	Array<IAddComponentPlugin*> m_add_cmp_plugins;
 	Array<StaticString<MAX_PATH_LENGTH>> m_universes;
@@ -2602,6 +2761,16 @@ public:
 	bool m_is_save_as_dialog_open;
 	ImFont* m_font;
 	ImFont* m_bold_font;
+	
+	struct WatchedPlugin
+	{
+		FileSystemWatcher* watcher = nullptr;
+		StaticString<MAX_PATH_LENGTH> dir;
+		StaticString<MAX_PATH_LENGTH> basename;
+		Lumix::IPlugin* plugin = nullptr;
+		int iteration = 0;
+		bool reload_request = false;
+	} m_watched_plugin;
 };
 
 
@@ -2652,7 +2821,8 @@ void StudioApp::StaticPluginRegister::create(StudioApp& app)
 	auto* i = s_first_plugin;
 	while (i)
 	{
-		i->creator(app);
+		StudioApp::IPlugin* plugin = i->creator(app);
+		app.addPlugin(*plugin);
 		i = i->next;
 	}
 }

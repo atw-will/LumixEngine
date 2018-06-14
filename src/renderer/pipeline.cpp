@@ -7,6 +7,7 @@
 #include "engine/log.h"
 #include "engine/lua_wrapper.h"
 #include "engine/job_system.h"
+#include "engine/mt/atomic.h"
 #include "engine/profiler.h"
 #include "engine/engine.h"
 #include "imgui/imgui.h"
@@ -16,6 +17,7 @@
 #include "renderer/material.h"
 #include "renderer/material_manager.h"
 #include "renderer/model.h"
+#include "renderer/occlusion_buffer.h"
 #include "renderer/particle_system.h"
 #include "renderer/pose.h"
 #include "renderer/render_scene.h"
@@ -40,13 +42,16 @@ static const float SHADOW_CAM_FAR = 5000.0f;
 
 struct InstanceData
 {
-	static const int MAX_INSTANCE_COUNT = 128;
+	static const int MAX_INSTANCE_COUNT = 1024;
 
 	bgfx::InstanceDataBuffer buffer;
-	int offset;
-	int instances_count;
-	Mesh* mesh;
+	int offset = 0;
+	int instances_count = 0;
+	const Mesh* mesh = nullptr;
 };
+
+
+static thread_local InstanceData s_instance_data;
 
 
 struct View
@@ -294,6 +299,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		, m_define(define, allocator)
 		, m_draw2d(allocator)
 		, m_is_first_render(true)
+		, m_occlusion_buffer(allocator)
 	{
 		for (auto& handle : m_debug_vertex_buffers)
 		{
@@ -657,7 +663,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 			executeCommandBuffer(material->getCommandBuffer(), material);
 			executeCommandBuffer(view.command_buffer.buffer, material);
 
-			bgfx::setInstanceDataBuffer(&instance_buffer, count);
+			bgfx::setInstanceDataBuffer(&instance_buffer, 0, count);
 			bgfx::setVertexBuffer(0, m_particle_vertex_buffer);
 			bgfx::setIndexBuffer(m_particle_index_buffer);
 			bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE);
@@ -743,7 +749,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 			executeCommandBuffer(material->getCommandBuffer(), material);
 			executeCommandBuffer(view.command_buffer.buffer, material);
 
-			bgfx::setInstanceDataBuffer(&instance_buffer, count);
+			bgfx::setInstanceDataBuffer(&instance_buffer, 0, count);
 			bgfx::setVertexBuffer(0, m_particle_vertex_buffer);
 			bgfx::setIndexBuffer(m_particle_index_buffer);
 			bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE);
@@ -850,13 +856,14 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 	}
 
 
-	void finishInstances(int idx)
+	void finishInstances(bgfx::Encoder* encoder)
 	{
-		InstanceData& data = m_instances_data[idx];
+		InstanceData& data = s_instance_data;
+		if (!data.mesh) return;
 		if (!data.buffer.data) return;
 		if (data.instances_count == 0) return;
 
-		Mesh& mesh = *data.mesh;
+		const Mesh& mesh = *data.mesh;
 		Material* material = mesh.material;
 
 		material->setDefine(m_instanced_define_idx, true);
@@ -865,23 +872,22 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		ASSERT(view_idx >= 0);
 		auto& view = m_views[view_idx >= 0 ? view_idx : 0];
 
-		executeCommandBuffer(material->getCommandBuffer(), material);
-		executeCommandBuffer(view.command_buffer.buffer, material);
+		executeCommandBuffer(encoder, material->getCommandBuffer(), material);
+		executeCommandBuffer(encoder, view.command_buffer.buffer, material);
 
-		bgfx::setVertexBuffer(0, mesh.vertex_buffer_handle);
-		bgfx::setIndexBuffer(mesh.index_buffer_handle);
-		bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE);
-		bgfx::setState(view.render_state | material->getRenderStates());
+		encoder->setVertexBuffer(0, mesh.vertex_buffer_handle);
+		encoder->setIndexBuffer(mesh.index_buffer_handle);
+		encoder->setStencil(view.stencil, BGFX_STENCIL_NONE);
+		encoder->setState(view.render_state | material->getRenderStates());
 		data.buffer.offset += data.offset * sizeof(Matrix);
-		bgfx::setInstanceDataBuffer(&data.buffer, data.instances_count);
+		encoder->setInstanceDataBuffer(&data.buffer, 0, data.instances_count);
 		data.buffer.offset -= data.offset * sizeof(Matrix);
 		ShaderInstance& shader_instance = material->getShaderInstance();
-		++m_stats.draw_call_count;
-		m_stats.instance_count += data.instances_count;
-		m_stats.triangle_count += data.instances_count * mesh.indices_count / 3;
-		bgfx::submit(view.bgfx_id, shader_instance.getProgramHandle(view.pass_idx));
+		MT::atomicIncrement(&m_stats.draw_call_count);
+		MT::atomicAdd(&m_stats.instance_count, data.instances_count);
+		MT::atomicAdd(&m_stats.triangle_count, data.instances_count * mesh.indices_count / 3);
+		encoder->submit(view.bgfx_id, shader_instance.getProgramHandle(view.pass_idx));
 
-		
 		data.offset += data.instances_count;
 		if (data.offset == InstanceData::MAX_INSTANCE_COUNT)
 		{
@@ -889,7 +895,6 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 			data.offset = 0;
 		}
 		data.instances_count = 0;
-		mesh.instance_idx = -1;
 		data.mesh = nullptr;
 	}
 
@@ -910,16 +915,6 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		view.fastInverse();
 		bgfx::setViewTransform(m_current_view->bgfx_id, &view.m11, &projection_matrix.m11);
 		bgfx::setViewRect(m_current_view->bgfx_id, 0, 0, (u16)m_width, (u16)m_height);
-	}
-
-
-	void finishInstances()
-	{
-		for (int i = 0; i < lengthOf(m_instances_data); ++i)
-		{
-			finishInstances(i);
-		}
-		m_instance_data_idx = 0;
 	}
 
 
@@ -983,7 +978,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 			return;
 		}
 
-		ortho.setOrtho(0.0f, size.x, size.y, 0.0f, -1.0f, 1.0f, bgfx::getCaps()->homogeneousDepth);
+		ortho.setOrtho(0.0f, size.x, size.y, 0.0f, -1.0f, 1.0f, bgfx::getCaps()->homogeneousDepth, true);
 		setViewProjection(ortho, (int)size.x, (int)size.y);
 
 		int num_indices = m_draw2d.IdxBuffer.size();
@@ -1124,7 +1119,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 				break;
 			}
 		}
-		finishInstances();
+		finishInstances(m_renderer.getEncoder());
 	}
 
 
@@ -1141,7 +1136,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		m_current_view->layer_mask = layer_mask;
 		m_current_view->bgfx_id = (u8)m_renderer.getViewCounter();
 		m_current_view->stencil = BGFX_STENCIL_NONE;
-		m_current_view->render_state = BGFX_STATE_RGB_WRITE | BGFX_STATE_ALPHA_WRITE | BGFX_STATE_DEPTH_WRITE;
+		m_current_view->render_state = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z;
 		m_current_view->pass_idx = m_pass_idx;
 		m_current_view->command_buffer.clear();
 		m_global_textures_count = 0;
@@ -1160,7 +1155,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		{
 			bgfx::setViewFrameBuffer(m_current_view->bgfx_id, BGFX_INVALID_HANDLE);
 		}
-		bgfx::setViewClear(m_current_view->bgfx_id, 0);
+		bgfx::setViewClear(m_current_view->bgfx_id, 0, (u32)255, 0, 0);
 		bgfx::setViewName(m_current_view->bgfx_id, debug_name);
 		return m_view_idx;
 	}
@@ -1256,7 +1251,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		PointLightShadowmap* shadowmap)
 	{
 		View& view = *m_current_view;
-		bgfx::setInstanceDataBuffer(instance_buffer, instance_count);
+		bgfx::setInstanceDataBuffer(instance_buffer, 0, instance_count);
 		bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE); 
 		auto state = view.render_state | material->getRenderStates();
 		if (is_intersecting)
@@ -1450,12 +1445,12 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		u16 shadowmap_width = (u16)m_current_framebuffer->getWidth();
 		Vec3 pos = mtx.getTranslation();
 
-		bgfx::setViewClear(m_current_view->bgfx_id, BGFX_CLEAR_DEPTH, 0, 1.0f, 0);
+		bgfx::setViewClear(m_current_view->bgfx_id, BGFX_CLEAR_DEPTH, 0, 0.0f, 0);
 		bgfx::touch(m_current_view->bgfx_id);
 		bgfx::setViewRect(m_current_view->bgfx_id, 0, 0, shadowmap_width, shadowmap_height);
 
 		Matrix projection_matrix;
-		projection_matrix.setPerspective(fov, 1, 0.01f, range, bgfx::getCaps()->homogeneousDepth);
+		projection_matrix.setPerspective(fov, 1, 0.01f, range, bgfx::getCaps()->homogeneousDepth, true);
 		Matrix view_matrix;
 		view_matrix.lookAt(pos, pos - mtx.getZVector(), mtx.getYVector());
 		bgfx::setViewTransform(m_current_view->bgfx_id, &view_matrix.m11, &projection_matrix.m11);
@@ -1509,7 +1504,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		{
 			newView("omnilight", 0xff);
 
-			bgfx::setViewClear(m_current_view->bgfx_id, BGFX_CLEAR_DEPTH, 0, 1.0f, 0);
+			bgfx::setViewClear(m_current_view->bgfx_id, BGFX_CLEAR_DEPTH, 0, 0.0f, 0);
 			bgfx::touch(m_current_view->bgfx_id);
 			u16 view_x = u16(shadowmap_width * viewports[i * 2]);
 			u16 view_y = u16(shadowmap_height * viewports[i * 2 + 1]);
@@ -1521,7 +1516,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 			float aspect = tanf(fovx * 0.5f) / tanf(fovy * 0.5f);
 
 			Matrix projection_matrix;
-			projection_matrix.setPerspective(fovx, aspect, 0.01f, range, bgfx::getCaps()->homogeneousDepth);
+			projection_matrix.setPerspective(fovx, aspect, 0.01f, range, bgfx::getCaps()->homogeneousDepth, true);
 
 			Matrix view_matrix;
 			if (bgfx::getCaps()->originBottomLeft)
@@ -1560,7 +1555,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 				, frustum
 				, tmp_meshes);
 
-			renderMeshes(tmp_meshes);
+			renderMeshes(tmp_meshes, false);
 		}
 	}
 
@@ -1664,7 +1659,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		Vec4 cascades = m_scene->getShadowmapCascades(light);
 		float split_distances[] = {0.1f, cascades.x, cascades.y, cascades.z, cascades.w};
 		m_is_rendering_in_shadowmap = true;
-		bgfx::setViewClear(m_current_view->bgfx_id, BGFX_CLEAR_DEPTH | BGFX_CLEAR_COLOR, 0xffffffff, 1.0f, 0);
+		bgfx::setViewClear(m_current_view->bgfx_id, BGFX_CLEAR_DEPTH | BGFX_CLEAR_COLOR, 0xffffffff, 0, 0);
 		bgfx::touch(m_current_view->bgfx_id);
 		float* viewport = (bgfx::getCaps()->originBottomLeft ? viewports_gl : viewports) + split_index * 2;
 		bgfx::setViewRect(m_current_view->bgfx_id,
@@ -1689,14 +1684,18 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		shadow_cam_pos = shadowmapTexelAlign(shadow_cam_pos, 0.5f * shadowmap_width - 2, bb_size, light_mtx);
 
 		Matrix projection_matrix;
-		projection_matrix.setOrtho(-bb_size, bb_size, -bb_size, bb_size, SHADOW_CAM_NEAR, SHADOW_CAM_FAR, bgfx::getCaps()->homogeneousDepth);
+		projection_matrix.setOrtho(-bb_size, bb_size, -bb_size, bb_size, SHADOW_CAM_NEAR, SHADOW_CAM_FAR, bgfx::getCaps()->homogeneousDepth, true);
 		Vec3 light_forward = light_mtx.getZVector();
 		shadow_cam_pos -= light_forward * SHADOW_CAM_FAR * 0.5f;
 		Matrix view_matrix;
 		view_matrix.lookAt(shadow_cam_pos, shadow_cam_pos + light_forward, light_mtx.getYVector());
 		bgfx::setViewTransform(m_current_view->bgfx_id, &view_matrix.m11, &projection_matrix.m11);
 		float ymul = bgfx::getCaps()->originBottomLeft ? 0.5f : -0.5f;
-		static const Matrix biasMatrix(0.5, 0.0, 0.0, 0.0, 0.0, ymul, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.5, 0.5, 0.5, 1.0);
+		static const Matrix biasMatrix(
+			0.5, 0.0, 0.0, 0.0, 
+			0.0, ymul, 0.0, 0.0, 
+			0.0, 0.0, 0.5, 0.0, 
+			0.5, 0.5, 0.5, 1.0);
 		m_shadow_viewprojection[split_index] = biasMatrix * (projection_matrix * view_matrix);
 
 		Frustum shadow_camera_frustum;
@@ -1705,7 +1704,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 
 		findExtraShadowcasterPlanes(light_forward, camera_frustum, camera_matrix.getTranslation(), &shadow_camera_frustum);
 
-		renderAll(shadow_camera_frustum, false, m_applied_camera, m_current_view->layer_mask);
+		renderAll(shadow_camera_frustum, false, m_applied_camera, m_current_view->layer_mask, false);
 
 		m_is_rendering_in_shadowmap = false;
 	}
@@ -2022,35 +2021,35 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 	void enableDepthWrite()
 	{
 		if (!m_current_view) return;
-		m_current_view->render_state |= BGFX_STATE_DEPTH_WRITE;
+		m_current_view->render_state |= BGFX_STATE_WRITE_Z;
 	}
 
 	void disableDepthWrite()
 	{
 		if (!m_current_view) return;
-		m_current_view->render_state &= ~BGFX_STATE_DEPTH_WRITE;
+		m_current_view->render_state &= ~BGFX_STATE_WRITE_Z;
 	}
 
 	void enableAlphaWrite()
 	{
 		if (!m_current_view) return;
-		m_current_view->render_state |= BGFX_STATE_ALPHA_WRITE;
+		m_current_view->render_state |= BGFX_STATE_WRITE_A;
 	}
 	void disableAlphaWrite()
 	{
 		if (!m_current_view) return;
-		m_current_view->render_state &= ~BGFX_STATE_ALPHA_WRITE;
+		m_current_view->render_state &= ~BGFX_STATE_WRITE_A;
 	}
 
 	void enableRGBWrite()
 	{
 		if (!m_current_view) return;
-		m_current_view->render_state |= BGFX_STATE_RGB_WRITE;
+		m_current_view->render_state |= BGFX_STATE_WRITE_RGB;
 	}
 	void disableRGBWrite()
 	{
 		if (!m_current_view) return;
-		m_current_view->render_state &= ~BGFX_STATE_RGB_WRITE;
+		m_current_view->render_state &= ~BGFX_STATE_WRITE_RGB;
 	}
 
 
@@ -2061,7 +2060,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		Array<MeshInstance> tmp_meshes(m_renderer.getEngine().getLIFOAllocator());
 		Vec3 lod_ref_point = m_scene->getUniverse().getPosition(m_applied_camera);
 		m_scene->getPointLightInfluencedGeometry(light, m_applied_camera, lod_ref_point, tmp_meshes);
-		renderMeshes(tmp_meshes);
+		renderMeshes(tmp_meshes, false);
 	}
 
 
@@ -2086,7 +2085,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 					, lod_ref_point
 					, frustum
 					, tmp_meshes);
-				renderMeshes(tmp_meshes);
+				renderMeshes(tmp_meshes, false);
 			}
 
 			{
@@ -2134,7 +2133,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		}
 
 		Matrix projection_mtx;
-		projection_mtx.setOrtho(0, 1, 0, 1, 0, 30, bgfx::getCaps()->homogeneousDepth);
+		projection_mtx.setOrtho(0, 1, 0, 1, 0, 30, bgfx::getCaps()->homogeneousDepth, true);
 
 		bgfx::setViewTransform(m_current_view->bgfx_id, &Matrix::IDENTITY.m11, &projection_mtx.m11);
 		if (m_current_framebuffer)
@@ -2219,7 +2218,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 			Matrix inv_view_matrix = universe.getPositionAndRotation(m_applied_camera);
 			Matrix view_matrix = inv_view_matrix;
 			view_matrix.fastInverse();
-			projection_matrix.setPerspective(fov, ratio, near_plane, far_plane, bgfx::getCaps()->homogeneousDepth);
+			projection_matrix.setPerspective(fov, ratio, near_plane, far_plane, bgfx::getCaps()->homogeneousDepth, true);
 			Matrix inv_projection = projection_matrix;
 			inv_projection.inverse();
 
@@ -2251,7 +2250,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 	}
 
 
-	void renderAll(const Frustum& frustum, bool render_grass, Entity camera, u64 layer_mask)
+	void renderAll(const Frustum& frustum, bool render_grass, Entity camera, u64 layer_mask, bool use_occlusion_culling)
 	{
 		PROFILE_FUNCTION();
 
@@ -2284,9 +2283,48 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		JobSystem::runJobs(jobs, render_grass ? 3 : 2, &counter);
 		JobSystem::wait(&counter);
 		
-		renderMeshes(*m_mesh_buffer);
-		if(render_grass) renderGrasses(m_grasses_buffer);
 		renderTerrains(m_terrains_buffer);
+		renderMeshes(*m_mesh_buffer, use_occlusion_culling);
+		
+		if(render_grass) renderGrasses(m_grasses_buffer);
+	}
+
+
+	void rasterizeOccluders(u64 layer_mask)
+	{
+		PROFILE_FUNCTION();
+
+		if (!m_applied_camera.isValid()) return;
+
+		Vec3 lod_ref_point = m_scene->getUniverse().getPosition(m_applied_camera);
+		Frustum frustum = m_scene->getCameraFrustum(m_applied_camera);
+		m_mesh_buffer = &m_scene->getModelInstanceInfos(frustum, lod_ref_point, m_applied_camera, layer_mask);
+
+		m_occlusion_buffer.clear();
+		Universe* universe = &m_scene->getUniverse();
+		Matrix projection = m_scene->getCameraProjection(m_applied_camera);
+		Matrix view = universe->getMatrix(m_applied_camera);
+		view.fastInverse();
+		m_occlusion_buffer.setCamera(view, projection);
+		for (auto& meshes : *m_mesh_buffer)
+		{
+			m_occlusion_buffer.rasterize(universe, meshes);
+		}
+		m_occlusion_buffer.buildHierarchy();
+	}
+
+
+
+	void debugOcclusionBuffer()
+	{
+		static bgfx::TextureHandle texture = bgfx::createTexture2D(384, 192, false, 1, bgfx::TextureFormat::RGBA8, 0);
+		auto mem = bgfx::copy(m_occlusion_buffer.getMip(0), 384 * 192 * 4);
+		bgfx::updateTexture2D(texture, 0, 0, 0, 0, 384, 192, mem, 384 * 4);
+
+		ImGui::Begin("Debug");
+		bgfx::setMarker("xx");
+		ImGui::Image(&texture, { 384, 192 });
+		ImGui::End();
 	}
 
 
@@ -2306,6 +2344,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 
 	void renderModel(Model& model, Pose* pose, const Matrix& mtx) override
 	{
+		bgfx::Encoder* encoder = m_renderer.getEncoder();
 		Vec3 camera_pos = m_scene->getUniverse().getPosition(m_applied_camera);
 
 		for (int i = 0; i < model.getMeshCount(); ++i)
@@ -2314,29 +2353,29 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 			switch (mesh.type)
 			{
 				case Mesh::RIGID_INSTANCED:
-					renderRigidMeshInstanced(mtx, mesh);
+					renderRigidMeshInstanced(encoder, s_instance_data, mtx, mesh);
 					break;
 				case Mesh::RIGID:
 				{
 					float depth = (camera_pos - mtx.getTranslation()).squaredLength();
-					renderRigidMesh(mtx, mesh, depth);
+					renderRigidMesh(encoder, mtx, mesh, depth);
 					break;
 				}
 				case Mesh::MULTILAYER_RIGID:
-					renderMultilayerRigidMesh(model, mtx, mesh);
+					renderMultilayerRigidMesh(encoder, model, mtx, mesh);
 					break;
 				case Mesh::MULTILAYER_SKINNED:
-					renderMultilayerSkinnedMesh(*pose, model, mtx, mesh);
+					renderMultilayerSkinnedMesh(encoder, *pose, model, mtx, mesh);
 					break;
 				case Mesh::SKINNED:
-					if(pose) renderSkinnedMesh(*pose, model, mtx, mesh);
+					if(pose) renderSkinnedMesh(encoder, *pose, model, mtx, mesh);
 					break;
 			}
 		}
 	}
 
 
-	void renderSkinnedMesh(const Pose& pose, const Model& model, const Matrix& matrix, const Mesh& mesh)
+	void renderSkinnedMesh(bgfx::Encoder* encoder, const Pose& pose, const Model& model, const Matrix& matrix, const Mesh& mesh)
 	{
 		Material* material = mesh.material;
 		auto& shader_instance = mesh.material->getShaderInstance();
@@ -2362,23 +2401,23 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 
 		if (!bgfx::isValid(shader_instance.getProgramHandle(view.pass_idx))) return;
 
-		bgfx::setUniform(m_bone_matrices_uniform, bone_mtx, pose.count);
-		executeCommandBuffer(material->getCommandBuffer(), material);
-		executeCommandBuffer(view.command_buffer.buffer, material);
+		encoder->setUniform(m_bone_matrices_uniform, bone_mtx, pose.count);
+		executeCommandBuffer(encoder, material->getCommandBuffer(), material);
+		executeCommandBuffer(encoder, view.command_buffer.buffer, material);
 
-		bgfx::setTransform(&matrix);
-		bgfx::setVertexBuffer(0, mesh.vertex_buffer_handle);
-		bgfx::setIndexBuffer(mesh.index_buffer_handle);
-		bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE);
-		bgfx::setState(view.render_state | material->getRenderStates());
+		encoder->setTransform(&matrix);
+		encoder->setVertexBuffer(0, mesh.vertex_buffer_handle);
+		encoder->setIndexBuffer(mesh.index_buffer_handle);
+		encoder->setStencil(view.stencil, BGFX_STENCIL_NONE);
+		encoder->setState(view.render_state | material->getRenderStates());
 		++m_stats.draw_call_count;
 		++m_stats.instance_count;
 		m_stats.triangle_count += mesh.indices_count / 3;
-		bgfx::submit(view.bgfx_id, shader_instance.getProgramHandle(view.pass_idx));
+		encoder->submit(view.bgfx_id, shader_instance.getProgramHandle(view.pass_idx));
 	}
 
 
-	void renderMultilayerRigidMesh(const Model& model, const Matrix& matrix, const Mesh& mesh)
+	void renderMultilayerRigidMesh(bgfx::Encoder* encoder, const Model& model, const Matrix& matrix, const Mesh& mesh)
 	{
 		Material* material = mesh.material;
 
@@ -2388,18 +2427,18 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		auto& shader_instance = mesh.material->getShaderInstance();
 
 		auto renderLayer = [&](View& view) {
-			executeCommandBuffer(material->getCommandBuffer(), material);
-			executeCommandBuffer(view.command_buffer.buffer, material);
+			executeCommandBuffer(encoder, material->getCommandBuffer(), material);
+			executeCommandBuffer(encoder, view.command_buffer.buffer, material);
 
-			bgfx::setTransform(&matrix);
-			bgfx::setVertexBuffer(0, mesh.vertex_buffer_handle);
-			bgfx::setIndexBuffer(mesh.index_buffer_handle);
-			bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE);
-			bgfx::setState(view.render_state | material->getRenderStates());
+			encoder->setTransform(&matrix);
+			encoder->setVertexBuffer(0, mesh.vertex_buffer_handle);
+			encoder->setIndexBuffer(mesh.index_buffer_handle);
+			encoder->setStencil(view.stencil, BGFX_STENCIL_NONE);
+			encoder->setState(view.render_state | material->getRenderStates());
 			++m_stats.draw_call_count;
 			++m_stats.instance_count;
 			m_stats.triangle_count += mesh.indices_count / 3;
-			bgfx::submit(view.bgfx_id, shader_instance.getProgramHandle(view.pass_idx));
+			encoder->submit(view.bgfx_id, shader_instance.getProgramHandle(view.pass_idx));
 		};
 
 		int view_idx = m_layer_to_view_map[material->getRenderLayer()];
@@ -2411,7 +2450,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 				for (int i = 0; i < layers_count; ++i)
 				{
 					Vec4 layer((i + 1) / (float)layers_count, 0, 0, 0);
-					bgfx::setUniform(m_layer_uniform, &layer);
+					encoder->setUniform(m_layer_uniform, &layer);
 					renderLayer(view);
 				}
 			}
@@ -2425,7 +2464,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 	}
 
 
-	LUMIX_FORCE_INLINE void renderRigidMesh(const Matrix& matrix, Mesh& mesh, float depth)
+	LUMIX_FORCE_INLINE void renderRigidMesh(bgfx::Encoder* encoder, const Matrix& matrix, Mesh& mesh, float depth)
 	{
 		Material* material = mesh.material;
 
@@ -2435,23 +2474,23 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		ASSERT(view_idx >= 0);
 		auto& view = m_views[view_idx >= 0 ? view_idx : 0];
 
-		executeCommandBuffer(material->getCommandBuffer(), material);
-		executeCommandBuffer(view.command_buffer.buffer, material);
+		executeCommandBuffer(encoder, material->getCommandBuffer(), material);
+		executeCommandBuffer(encoder, view.command_buffer.buffer, material);
 
-		bgfx::setTransform(&matrix);
-		bgfx::setVertexBuffer(0, mesh.vertex_buffer_handle);
-		bgfx::setIndexBuffer(mesh.index_buffer_handle);
-		bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE);
-		bgfx::setState(view.render_state | material->getRenderStates());
+		encoder->setTransform(&matrix);
+		encoder->setVertexBuffer(0, mesh.vertex_buffer_handle);
+		encoder->setIndexBuffer(mesh.index_buffer_handle);
+		encoder->setStencil(view.stencil, BGFX_STENCIL_NONE);
+		encoder->setState(view.render_state | material->getRenderStates());
 		ShaderInstance& shader_instance = material->getShaderInstance();
 		++m_stats.draw_call_count;
 		++m_stats.instance_count;
 		m_stats.triangle_count += mesh.indices_count / 3;
-		bgfx::submit(view.bgfx_id, shader_instance.getProgramHandle(view.pass_idx), Math::floatFlip(*(u32*)&depth));
+		encoder->submit(view.bgfx_id, shader_instance.getProgramHandle(view.pass_idx), Math::floatFlip(*(u32*)&depth));
 	}
 
 
-	void renderMultilayerSkinnedMesh(const Pose& pose, const Model& model, const Matrix& matrix, const Mesh& mesh)
+	void renderMultilayerSkinnedMesh(bgfx::Encoder* encoder, const Pose& pose, const Model& model, const Matrix& matrix, const Mesh& mesh)
 	{
 		Material* material = mesh.material;
 
@@ -2473,19 +2512,19 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		auto& shader_instance = mesh.material->getShaderInstance();
 
 		auto renderLayer = [&](View& view) {
-			bgfx::setUniform(m_bone_matrices_uniform, bone_mtx, pose.count);
-			executeCommandBuffer(material->getCommandBuffer(), material);
-			executeCommandBuffer(view.command_buffer.buffer, material);
+			encoder->setUniform(m_bone_matrices_uniform, bone_mtx, pose.count);
+			executeCommandBuffer(encoder, material->getCommandBuffer(), material);
+			executeCommandBuffer(encoder, view.command_buffer.buffer, material);
 
-			bgfx::setTransform(&matrix);
-			bgfx::setVertexBuffer(0, mesh.vertex_buffer_handle);
-			bgfx::setIndexBuffer(mesh.index_buffer_handle);
-			bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE);
-			bgfx::setState(view.render_state | material->getRenderStates());
+			encoder->setTransform(&matrix);
+			encoder->setVertexBuffer(0, mesh.vertex_buffer_handle);
+			encoder->setIndexBuffer(mesh.index_buffer_handle);
+			encoder->setStencil(view.stencil, BGFX_STENCIL_NONE);
+			encoder->setState(view.render_state | material->getRenderStates());
 			++m_stats.draw_call_count;
 			++m_stats.instance_count;
 			m_stats.triangle_count += mesh.indices_count / 3;
-			bgfx::submit(view.bgfx_id, shader_instance.getProgramHandle(view.pass_idx));
+			encoder->submit(view.bgfx_id, shader_instance.getProgramHandle(view.pass_idx));
 		};
 
 		int view_idx = m_layer_to_view_map[material->getRenderLayer()];
@@ -2497,7 +2536,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 				for (int i = 0; i < layers_count; ++i)
 				{
 					Vec4 layer((i + 1) / (float)layers_count, 0, 0, 0);
-					bgfx::setUniform(m_layer_uniform, &layer);
+					encoder->setUniform(m_layer_uniform, &layer);
 					renderLayer(view);
 				}
 			}
@@ -2623,17 +2662,15 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		bgfx::submit(m_current_view->bgfx_id, shader_instance.getProgramHandle(m_pass_idx));
 	}
 
-	LUMIX_FORCE_INLINE void renderRigidMeshInstanced(const Matrix& matrix, Mesh& mesh)
+
+	
+	LUMIX_FORCE_INLINE void renderRigidMeshInstanced(bgfx::Encoder* encoder, InstanceData& data, const Matrix& matrix, const Mesh& mesh)
 	{
-		int instance_idx = mesh.instance_idx;
-		if (instance_idx == -1)
+		if (data.mesh != &mesh)
 		{
-			instance_idx = m_instance_data_idx;
-			m_instance_data_idx = (m_instance_data_idx + 1) % lengthOf(m_instances_data);
-			InstanceData& data = m_instances_data[instance_idx];
-			if (data.instances_count > 0)
+			if (data.mesh)
 			{
-				finishInstances(instance_idx);
+				finishInstances(encoder);
 			}
 			if (!data.buffer.data)
 			{
@@ -2643,20 +2680,19 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 					return;
 				}
 				bgfx::allocInstanceDataBuffer(&data.buffer, InstanceData::MAX_INSTANCE_COUNT, sizeof(Matrix));
+				ASSERT(data.buffer.data);
 				data.instances_count = 0;
 				data.offset = 0;
 			}
 			data.mesh = &mesh;
-			mesh.instance_idx = instance_idx;
 		}
-		InstanceData& data = m_instances_data[instance_idx];
 		Matrix* mtcs = (Matrix*)data.buffer.data;
 		copyMemory(&mtcs[data.offset + data.instances_count], &matrix, sizeof(matrix));
 		++data.instances_count;
 
 		if (data.instances_count + data.offset == InstanceData::MAX_INSTANCE_COUNT)
 		{
-			finishInstances(instance_idx);
+			finishInstances(encoder);
 		}
 	}
 
@@ -2673,7 +2709,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		executeCommandBuffer(material.getCommandBuffer(), &material);
 		executeCommandBuffer(view.command_buffer.buffer, &material);
 
-		bgfx::setInstanceDataBuffer(&instance_buffer, count);
+		bgfx::setInstanceDataBuffer(&instance_buffer, 0, count);
 		bgfx::setVertexBuffer(0, vertex_buffer);
 		bgfx::setIndexBuffer(index_buffer);
 		bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE);
@@ -2685,8 +2721,13 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		bgfx::submit(view.bgfx_id, material.getShaderInstance().getProgramHandle(view.pass_idx));
 	}
 
-
 	void executeCommandBuffer(const u8* data, Material* material) const
+	{
+		bgfx::Encoder* encoder = m_renderer.getEncoder();
+		executeCommandBuffer(encoder, data, material);
+	}
+
+	void executeCommandBuffer(bgfx::Encoder* encoder, const u8* data, Material* material) const
 	{
 		const u8* ip = data;
 		for (;;)
@@ -2698,7 +2739,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 				case BufferCommands::SET_TEXTURE:
 				{
 					auto cmd = (SetTextureCommand*)ip;
-					bgfx::setTexture(cmd->stage, cmd->uniform, cmd->texture, cmd->flags);
+					encoder->setTexture(cmd->stage, cmd->uniform, cmd->texture, cmd->flags);
 					ip += sizeof(*cmd);
 					break;
 				}
@@ -2706,14 +2747,14 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 				{
 					auto cmd = (SetUniformTimeCommand*)ip;
 					auto uniform_time = Vec4(m_scene->getTime(), 0, 0, 0);
-					bgfx::setUniform(cmd->uniform, &uniform_time);
+					encoder->setUniform(cmd->uniform, &uniform_time);
 					ip += sizeof(*cmd);
 					break;
 				}
 				case BufferCommands::SET_UNIFORM_VEC4:
 				{
 					auto cmd = (SetUniformVec4Command*)ip;
-					bgfx::setUniform(cmd->uniform, &cmd->value);
+					encoder->setUniform(cmd->uniform, &cmd->value);
 					ip += sizeof(*cmd);
 					break;
 				}
@@ -2721,14 +2762,14 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 				{
 					auto cmd = (SetUniformArrayCommand*)ip;
 					ip += sizeof(*cmd);
-					bgfx::setUniform(cmd->uniform, ip, cmd->count);
+					encoder->setUniform(cmd->uniform, ip, cmd->count);
 					ip += cmd->size;
 					break;
 				}
 				case BufferCommands::SET_GLOBAL_SHADOWMAP:
 				{
 					auto handle = m_global_light_shadowmap->getRenderbufferHandle(0);
-					bgfx::setTexture(15 - m_global_textures_count,
+					encoder->setTexture(15 - m_global_textures_count,
 						m_tex_shadowmap_uniform,
 						handle, FrameBuffer::RenderBuffer::DEFAULT_FLAGS & ~ (BGFX_TEXTURE_MAG_MASK | BGFX_TEXTURE_MIN_MASK));
 					ip += 1;
@@ -2738,7 +2779,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 				{
 					auto cmd = (SetLocalShadowmapCommand*)ip;
 					material->setDefine(m_has_shadowmap_define_idx, bgfx::isValid(cmd->texture));
-					bgfx::setTexture(15 - m_global_textures_count,
+					encoder->setTexture(15 - m_global_textures_count,
 						m_tex_shadowmap_uniform,
 						cmd->texture);
 					ip += sizeof(*cmd);
@@ -2833,7 +2874,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 			mesh_part_indices_count);
 		bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE);
 		bgfx::setState(view.render_state | mesh.material->getRenderStates());
-		bgfx::setInstanceDataBuffer(&instance_buffer, m_terrain_instances[index].m_count);
+		bgfx::setInstanceDataBuffer(&instance_buffer, 0, m_terrain_instances[index].m_count);
 		auto shader_instance = material->getShaderInstance().getProgramHandle(view.pass_idx);
 		++m_stats.draw_call_count;
 		m_stats.instance_count += m_terrain_instances[index].m_count;
@@ -2867,7 +2908,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		bgfx::setIndexBuffer(mesh.index_buffer_handle);
 		bgfx::setStencil(view.stencil, BGFX_STENCIL_NONE);
 		bgfx::setState(view.render_state | material->getRenderStates());
-		bgfx::setInstanceDataBuffer(&idb, grass.instance_count);
+		bgfx::setInstanceDataBuffer(&idb, 0, grass.instance_count);
 		++m_stats.draw_call_count;
 		m_stats.instance_count += grass.instance_count;
 		m_stats.triangle_count += grass.instance_count * mesh.indices_count;
@@ -2900,73 +2941,97 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 	}
 
 
-	void renderMeshes(const Array<MeshInstance>& meshes)
+	void renderMeshes(const Array<MeshInstance>& meshes, bool use_occlusion_culling)
 	{
-		PROFILE_FUNCTION();
-		if(meshes.empty()) return;
-
-		ModelInstance* model_instances = m_scene->getModelInstances();
-		PROFILE_INT("mesh count", meshes.size());
-		for(auto& mesh : meshes)
-		{
-			ModelInstance& model_instance = model_instances[mesh.owner.index];
-			switch (mesh.mesh->type)
-			{
-				case Mesh::RIGID_INSTANCED:
-					renderRigidMeshInstanced(model_instance.matrix, *mesh.mesh);
-					break;
-				case Mesh::RIGID:
-					renderRigidMesh(model_instance.matrix, *mesh.mesh, mesh.depth);
-					break;
-				case Mesh::SKINNED:
-					renderSkinnedMesh(*model_instance.pose, *model_instance.model, model_instance.matrix, *mesh.mesh);
-					break;
-				case Mesh::MULTILAYER_SKINNED:
-					renderMultilayerSkinnedMesh(*model_instance.pose, *model_instance.model, model_instance.matrix, *mesh.mesh);
-					break;
-				case Mesh::MULTILAYER_RIGID:
-					renderMultilayerRigidMesh(*model_instance.model, model_instance.matrix, *mesh.mesh);
-					break;
-			}
-		}
-		finishInstances();
-	}
-
-
-	void renderMeshes(const Array<Array<MeshInstance>>& meshes)
-	{
+		bgfx::Encoder* encoder = m_renderer.getEncoder();
 		PROFILE_FUNCTION();
 		int mesh_count = 0;
-		for (auto& submeshes : meshes)
+		ModelInstance* model_instances = m_scene->getModelInstances();
+		if (use_occlusion_culling)
 		{
-			if(submeshes.empty()) continue;
-			ModelInstance* model_instances = m_scene->getModelInstances();
-			mesh_count += submeshes.size();
-			for (auto& mesh : submeshes)
+			mesh_count += meshes.size();
+			for (auto& mesh : meshes)
 			{
 				ModelInstance& model_instance = model_instances[mesh.owner.index];
 				switch (mesh.mesh->type)
 				{
-					case Mesh::RIGID_INSTANCED:
-						renderRigidMeshInstanced(model_instance.matrix, *mesh.mesh);
-						break;
-					case Mesh::RIGID:
-						renderRigidMesh(model_instance.matrix, *mesh.mesh, mesh.depth);
-						break;
-					case Mesh::SKINNED:
-						renderSkinnedMesh(*model_instance.pose, *model_instance.model, model_instance.matrix, *mesh.mesh);
-						break;
-					case Mesh::MULTILAYER_SKINNED:
-						renderMultilayerSkinnedMesh(*model_instance.pose, *model_instance.model, model_instance.matrix, *mesh.mesh);
-						break;
-					case Mesh::MULTILAYER_RIGID:
-						renderMultilayerRigidMesh(*model_instance.model, model_instance.matrix, *mesh.mesh);
-						break;
+				case Mesh::RIGID_INSTANCED:
+					if (m_occlusion_buffer.isOccluded(model_instance.matrix, model_instance.model->getAABB())) break;
+					renderRigidMeshInstanced(encoder, s_instance_data, model_instance.matrix, *mesh.mesh);
+					break;
+				case Mesh::RIGID:
+					renderRigidMesh(encoder, model_instance.matrix, *mesh.mesh, mesh.depth);
+					break;
+				case Mesh::SKINNED:
+					renderSkinnedMesh(encoder, *model_instance.pose, *model_instance.model, model_instance.matrix, *mesh.mesh);
+					break;
+				case Mesh::MULTILAYER_SKINNED:
+					renderMultilayerSkinnedMesh(encoder, *model_instance.pose, *model_instance.model, model_instance.matrix, *mesh.mesh);
+					break;
+				case Mesh::MULTILAYER_RIGID:
+					renderMultilayerRigidMesh(encoder, *model_instance.model, model_instance.matrix, *mesh.mesh);
+					break;
 				}
 			}
 		}
-		finishInstances();
+		else
+		{
+			mesh_count += meshes.size();
+			for (auto& mesh : meshes)
+			{
+				ModelInstance& model_instance = model_instances[mesh.owner.index];
+				switch (mesh.mesh->type)
+				{
+				case Mesh::RIGID_INSTANCED:
+					renderRigidMeshInstanced(encoder, s_instance_data, model_instance.matrix, *mesh.mesh);
+					break;
+				case Mesh::RIGID:
+					renderRigidMesh(encoder, model_instance.matrix, *mesh.mesh, mesh.depth);
+					break;
+				case Mesh::SKINNED:
+					renderSkinnedMesh(encoder, *model_instance.pose, *model_instance.model, model_instance.matrix, *mesh.mesh);
+					break;
+				case Mesh::MULTILAYER_SKINNED:
+					renderMultilayerSkinnedMesh(encoder, *model_instance.pose, *model_instance.model, model_instance.matrix, *mesh.mesh);
+					break;
+				case Mesh::MULTILAYER_RIGID:
+					renderMultilayerRigidMesh(encoder, *model_instance.model, model_instance.matrix, *mesh.mesh);
+					break;
+				}
+			}
+		}
+		finishInstances(encoder);
+		s_instance_data.buffer.data = nullptr;
+		s_instance_data.instances_count = 0;
+		s_instance_data.offset = 0;
 		PROFILE_INT("mesh count", mesh_count);
+	}
+
+
+	void renderMeshes(const Array<Array<MeshInstance>>& meshes, bool use_occlusion_culling)
+	{
+		PROFILE_FUNCTION();
+		struct Data
+		{
+			PipelineImpl* that;
+			const Array<MeshInstance>* meshes;
+			bool use_occlusion_culling;
+		} data[64];
+		JobSystem::JobDecl jobs[64];
+		volatile int counter = 0;
+		for (int i = 0; i < meshes.size(); ++i)
+		{
+			data[i].that = this;
+			data[i].use_occlusion_culling = use_occlusion_culling;
+			data[i].meshes = &meshes[i];
+			jobs[i].data = &data[i];
+			jobs[i].task = [](void* data) {
+				Data* job_data = (Data*)data;
+				job_data->that->renderMeshes(*job_data->meshes, job_data->use_occlusion_culling);
+			};
+		}
+		JobSystem::runJobs(jobs, meshes.size(), &counter);
+		JobSystem::wait(&counter);
 	}
 
 
@@ -3026,18 +3091,15 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		m_layer_mask = 0;
 		m_pass_idx = -1;
 		m_current_framebuffer = m_default_framebuffer;
-		m_instance_data_idx = 0;
+		s_instance_data.mesh = nullptr;
+		s_instance_data.buffer.data = nullptr;
+		s_instance_data.instances_count = 0;
+		s_instance_data.offset = 0;
 		m_point_light_shadowmaps.clear();
 		clearLayerToViewMap();
 		for (int i = 0; i < lengthOf(m_terrain_instances); ++i)
 		{
 			m_terrain_instances[i].m_count = 0;
-		}
-		for (int i = 0; i < lengthOf(m_instances_data); ++i)
-		{
-			m_instances_data[i].buffer.data = nullptr;
-			m_instances_data[i].instances_count = 0;
-			m_instances_data[i].offset = 0;
 		}
 
 		lua_rawgeti(m_lua_state, LUA_REGISTRYINDEX, m_lua_env);
@@ -3056,7 +3118,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 		{
 			lua_pop(m_lua_state, 1);
 		}
-		finishInstances();
+		ASSERT(!s_instance_data.mesh);
 		return success;
 	}
 
@@ -3127,7 +3189,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 	void clear(u32 flags, u32 color)
 	{
 		if (!m_current_view) return;
-		bgfx::setViewClear(m_current_view->bgfx_id, (u16)flags, color, 1.0f, 0);
+		bgfx::setViewClear(m_current_view->bgfx_id, (u16)flags, color, 0.0f, 0);
 		bgfx::touch(m_current_view->bgfx_id);
 	}
 
@@ -3196,8 +3258,6 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 	Array<bgfx::UniformHandle> m_uniforms;
 	Array<PointLightShadowmap> m_point_light_shadowmaps;
 	FrameBuffer* m_global_light_shadowmap;
-	InstanceData m_instances_data[128];
-	int m_instance_data_idx;
 	Entity m_applied_camera;
 	bgfx::VertexBufferHandle m_cube_vb;
 	bgfx::IndexBufferHandle m_cube_ib;
@@ -3252,6 +3312,7 @@ struct PipelineImpl LUMIX_FINAL : public Pipeline
 	Texture* m_default_cubemap;
 	bgfx::DynamicVertexBufferHandle m_debug_vertex_buffers[32];
 	bgfx::DynamicIndexBufferHandle m_debug_index_buffer;
+	OcclusionBuffer m_occlusion_buffer;
 	int m_debug_buffer_idx;
 	int m_has_shadowmap_define_idx;
 	int m_instanced_define_idx;
@@ -3389,10 +3450,11 @@ int addFramebuffer(lua_State* L)
 int renderModels(lua_State* L)
 {
 	auto* pipeline = LuaWrapper::checkArg<PipelineImpl*>(L, 1);
+	bool use_occlusion_culling = lua_gettop(L) > 1 ? LuaWrapper::checkArg<bool>(L, 2) : false;
 
 	Entity cam = pipeline->m_applied_camera;
 
-	pipeline->renderAll(pipeline->m_camera_frustum, true, cam, pipeline->m_layer_mask);
+	pipeline->renderAll(pipeline->m_camera_frustum, true, cam, pipeline->m_layer_mask, use_occlusion_culling);
 	pipeline->m_layer_mask = 0;
 	return 0;
 }
@@ -3508,6 +3570,8 @@ void Pipeline::registerLuaAPI(lua_State* L)
 
 	REGISTER_FUNCTION(renderTextMeshes);
 	REGISTER_FUNCTION(render2D);
+	REGISTER_FUNCTION(rasterizeOccluders);
+	REGISTER_FUNCTION(debugOcclusionBuffer);
 	REGISTER_FUNCTION(drawQuad);
 	REGISTER_FUNCTION(getLayerMask);
 	REGISTER_FUNCTION(drawQuadEx);

@@ -48,6 +48,7 @@ public:
 	IAllocator& getAllocator() { return m_allocator; }
 	void emplaceEntity(Entity entity);
 	Entity createEntity(const Vec3& position, const Quat& rotation);
+	Entity cloneEntity(Entity entity);
 	void destroyEntity(Entity entity);
 	void createComponent(ComponentType type, Entity entity);
 	void destroyComponent(Entity entity, ComponentType type);
@@ -71,7 +72,7 @@ public:
 	Entity getFirstEntity() const;
 	Entity getNextEntity(Entity entity) const;
 	const char* getEntityName(Entity entity) const;
-	Entity getEntityByName(const char* name);
+	Entity findByName(Entity parent, const char* name);
 	void setEntityName(Entity entity, const char* name);
 	bool hasEntity(Entity entity) const;
 
@@ -128,6 +129,7 @@ public:
 	IScene* getScene(u32 hash) const;
 	Array<IScene*>& getScenes();
 	void addScene(IScene* scene);
+	void removeScene(IScene* scene);
 
 private:
 	void transformEntity(Entity entity, bool update_local);

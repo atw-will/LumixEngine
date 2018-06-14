@@ -3,6 +3,7 @@
 #include "engine/engine.h"
 #include "engine/iplugin.h"
 #include "engine/log.h"
+#include "engine/path_utils.h"
 #include "engine/plugin_manager.h"
 #include "engine/profiler.h"
 #include "engine/system.h"
@@ -71,6 +72,15 @@ class PluginManagerImpl LUMIX_FINAL : public PluginManager
 		}
 
 
+		void* getLibrary(IPlugin* plugin) const
+		{
+			int idx = m_plugins.indexOf(plugin);
+			if (idx < 0) return nullptr;
+
+			return m_libraries[idx];
+		}
+
+
 		const Array<void*>& getLibraries() const override
 		{
 			return m_libraries;
@@ -102,17 +112,30 @@ class PluginManagerImpl LUMIX_FINAL : public PluginManager
 		}
 		
 
+		void unload(IPlugin* plugin) override
+		{
+			int idx = m_plugins.indexOf(plugin);
+			ASSERT(idx >= 0);
+			LUMIX_DELETE(m_engine.getAllocator(), m_plugins[idx]);
+			unloadLibrary(m_libraries[idx]);
+			m_libraries.erase(idx);
+			m_plugins.erase(idx);
+		}
+
+
 		IPlugin* load(const char* path) override
 		{
 			char path_with_ext[MAX_PATH_LENGTH];
 			copyString(path_with_ext, path);
+			const char* ext =
 			#ifdef _WIN32
-				catString(path_with_ext, ".dll");
+				".dll";
 			#elif defined __linux__
-				catString(path_with_ext, ".so");
+				".so";
 			#else 
 				#error Unknown platform
 			#endif
+			if (!PathUtils::hasExtension(path, ext + 1)) catString(path_with_ext, ext);
 			g_log_info.log("Core") << "loading plugin " << path_with_ext;
 			typedef IPlugin* (*PluginCreator)(Engine&);
 			auto* lib = loadLibrary(path_with_ext);

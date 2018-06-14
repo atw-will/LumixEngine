@@ -128,11 +128,7 @@ AssetBrowser::~AssetBrowser()
 	}
 	m_file_infos.clear();
 
-	for (auto* plugin : m_plugins)
-	{
-		LUMIX_DELETE(m_editor.getAllocator(), plugin);
-	}
-	m_plugins.clear();
+	ASSERT(m_plugins.size() == 0);
 
 	FileSystemWatcher::destroy(m_watchers[0]);
 	FileSystemWatcher::destroy(m_watchers[1]);
@@ -623,6 +619,13 @@ void AssetBrowser::onInitFinished()
 }
 
 
+void AssetBrowser::removePlugin(IPlugin& plugin)
+{
+	m_plugins.erase(plugin.getResourceType());
+	if (m_is_init_finished) findResources();
+}
+
+
 void AssetBrowser::addPlugin(IPlugin& plugin)
 {
 	m_plugins.insert(plugin.getResourceType(), &plugin);
@@ -799,7 +802,7 @@ bool AssetBrowser::resourceList(char* buf, int max_size, ResourceType type, floa
 	static char filter[128] = "";
 	ImGui::LabellessInputText("Filter", filter, sizeof(filter));
 
-	ImGui::BeginChild("Resources", ImVec2(0, height));
+	ImGui::BeginChild("Resources", ImVec2(0, height), false, ImGuiWindowFlags_HorizontalScrollbar);
 	for (auto& res : getResources(type))
 	{
 		if (filter[0] != '\0' && strstr(res.c_str(), filter) == nullptr) continue;

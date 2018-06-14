@@ -1871,7 +1871,7 @@ struct FurPainter LUMIX_FINAL : public WorldEditor::Plugin
 };
 
 
-struct FurPainterPlugin LUMIX_FINAL : public StudioApp::IPlugin
+struct FurPainterPlugin LUMIX_FINAL : public StudioApp::GUIPlugin
 {
 	explicit FurPainterPlugin(StudioApp& _app)
 		: app(_app)
@@ -1882,6 +1882,13 @@ struct FurPainterPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		action->func.bind<FurPainterPlugin, &FurPainterPlugin::onAction>(this);
 		action->is_selected.bind<FurPainterPlugin, &FurPainterPlugin::isOpen>(this);
 		app.addWindowAction(action);
+	}
+
+
+	~FurPainterPlugin()
+	{
+		app.getWorldEditor().removePlugin(*fur_painter);
+		LUMIX_DELETE(app.getWorldEditor().getAllocator(), fur_painter);
 	}
 
 
@@ -2374,7 +2381,7 @@ struct RenderInterfaceImpl LUMIX_FINAL : public RenderInterface
 		copyMemory(vertex_buffer.data, vertices, vertices_count * renderer.getBasicVertexDecl().getStride());
 		copyMemory(index_buffer.data, indices, indices_count * sizeof(u16));
 
-		u64 flags = BGFX_STATE_DEPTH_TEST_LEQUAL;
+		u64 flags = m_shader->m_render_states;
 		if (lines) flags |= BGFX_STATE_PT_LINES;
 		m_pipeline.render(vertex_buffer,
 			index_buffer,
@@ -2431,7 +2438,7 @@ struct RenderInterfaceImpl LUMIX_FINAL : public RenderInterface
 
 
 
-struct RenderStatsPlugin LUMIX_FINAL : public StudioApp::IPlugin
+struct RenderStatsPlugin LUMIX_FINAL : public StudioApp::GUIPlugin
 {
 	explicit RenderStatsPlugin(StudioApp& app)
 	{
@@ -2498,7 +2505,7 @@ struct RenderStatsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 };
 
 
-struct EditorUIRenderPlugin LUMIX_FINAL : public StudioApp::IPlugin
+struct EditorUIRenderPlugin LUMIX_FINAL : public StudioApp::GUIPlugin
 {
 	EditorUIRenderPlugin(StudioApp& app, SceneView& scene_view, GameView& game_view)
 		: m_app(app)
@@ -2600,7 +2607,7 @@ struct EditorUIRenderPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		float height = ImGui::GetIO().DisplaySize.y;
 		float bottom = height + top;
 		Matrix ortho;
-		ortho.setOrtho(left, right, bottom, top, -1.0f, 1.0f, bgfx::getCaps()->homogeneousDepth);
+		ortho.setOrtho(left, right, bottom, top, -1.0f, 1.0f, bgfx::getCaps()->homogeneousDepth, true);
 		if (framebuffer && (framebuffer->getWidth() != int(width + 0.5f) || framebuffer->getHeight() != int(height + 0.5f)))
 		{
 			framebuffer->resize((int)width, (int)height);
@@ -2696,7 +2703,7 @@ struct EditorUIRenderPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			
 			ShaderInstance& shader_instance = material->getShaderInstance();
 			bgfx::setStencil(BGFX_STENCIL_NONE, BGFX_STENCIL_NONE);
-			bgfx::setState(BGFX_STATE_RGB_WRITE | BGFX_STATE_ALPHA_WRITE | BGFX_STATE_DEPTH_WRITE | render_states);
+			bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_WRITE_Z | render_states);
 			bgfx::setVertexBuffer(0, m_vertex_buffer, m_vb_offset, num_vertices);
 			u32 first_index = elem_offset + m_ib_offset;
 			bgfx::setIndexBuffer(m_index_buffer, first_index, pcmd->ElemCount);
@@ -2724,7 +2731,7 @@ struct EditorUIRenderPlugin LUMIX_FINAL : public StudioApp::IPlugin
 };
 
 
-struct ShaderEditorPlugin LUMIX_FINAL : public StudioApp::IPlugin
+struct ShaderEditorPlugin LUMIX_FINAL : public StudioApp::GUIPlugin
 {
 	explicit ShaderEditorPlugin(StudioApp& app)
 		: m_shader_editor(app.getWorldEditor().getAllocator())
@@ -2761,7 +2768,7 @@ struct ShaderEditorPlugin LUMIX_FINAL : public StudioApp::IPlugin
 };
 
 
-struct WorldEditorPlugin LUMIX_FINAL : public WorldEditor::Plugin
+struct GizmoPlugin LUMIX_FINAL : public WorldEditor::Plugin
 {
 	void showPointLightGizmo(ComponentUID light)
 	{
@@ -2986,63 +2993,150 @@ struct AddTerrainComponentPlugin LUMIX_FINAL : public StudioApp::IAddComponentPl
 
 
 
-extern "C" {
+struct StudioAppPlugin : StudioApp::IPlugin
+{
+	StudioAppPlugin(StudioApp& app)
+		: m_app(app)
+	{
+		IAllocator& allocator = app.getWorldEditor().getAllocator();
+
+		Model::force_keep_skin = true;
+
+		app.registerComponent("camera", "Render/Camera");
+		app.registerComponent("global_light", "Render/Global light");
+
+		app.registerComponentWithResource("renderable", "Render/Mesh", Model::TYPE, *Reflection::getProperty(MODEL_INSTANCE_TYPE, "Source"));
+		app.registerComponentWithResource("particle_emitter", "Render/Particle emitter/Emitter", Material::TYPE, *Reflection::getProperty(PARTICLE_EMITTER_TYPE, "Material"));
+		app.registerComponentWithResource("scripted_particle_emitter", "Render/Particle emitter/DO NOT USE YET! Scripted Emitter", Material::TYPE, *Reflection::getProperty(SCRIPTED_PARTICLE_EMITTER_TYPE, "Material"));
+		app.registerComponent("particle_emitter_spawn_shape", "Render/Particle emitter/Spawn shape");
+		app.registerComponent("particle_emitter_alpha", "Render/Particle emitter/Alpha");
+		app.registerComponent("particle_emitter_plane", "Render/Particle emitter/Plane");
+		app.registerComponent("particle_emitter_force", "Render/Particle emitter/Force");
+		app.registerComponent("particle_emitter_attractor", "Render/Particle emitter/Attractor");
+		app.registerComponent("particle_emitter_subimage", "Render/Particle emitter/Subimage");
+		app.registerComponent("particle_emitter_linear_movement", "Render/Particle emitter/Linear movement");
+		app.registerComponent("particle_emitter_random_rotation", "Render/Particle emitter/Random rotation");
+		app.registerComponent("particle_emitter_size", "Render/Particle emitter/Size");
+		app.registerComponent("point_light", "Render/Point light");
+		app.registerComponent("decal", "Render/Decal");
+		app.registerComponent("bone_attachment", "Render/Bone attachment");
+		app.registerComponent("environment_probe", "Render/Environment probe");
+		app.registerComponentWithResource("text_mesh", "Render/Text 3D", FontResource::TYPE, *Reflection::getProperty(TEXT_MESH_TYPE, "Font"));
+
+		m_add_terrain_plugin = LUMIX_NEW(allocator, AddTerrainComponentPlugin)(app);
+		app.registerComponent("terrain", *m_add_terrain_plugin);
+
+		m_model_plugin = LUMIX_NEW(allocator, ModelPlugin)(app);
+		m_material_plugin = LUMIX_NEW(allocator, MaterialPlugin)(app);
+		m_font_plugin = LUMIX_NEW(allocator, FontPlugin)(app);
+		m_texture_plugin = LUMIX_NEW(allocator, TexturePlugin)(app);
+		m_shader_plugin = LUMIX_NEW(allocator, ShaderPlugin)(app);
+		AssetBrowser& asset_browser = app.getAssetBrowser();
+		asset_browser.addPlugin(*m_model_plugin);
+		asset_browser.addPlugin(*m_material_plugin);
+		asset_browser.addPlugin(*m_font_plugin);
+		asset_browser.addPlugin(*m_texture_plugin);
+		asset_browser.addPlugin(*m_shader_plugin);
+
+		m_emitter_plugin = LUMIX_NEW(allocator, EmitterPlugin)(app);
+		m_env_probe_plugin = LUMIX_NEW(allocator, EnvironmentProbePlugin)(app);
+		m_terrain_plugin = LUMIX_NEW(allocator, TerrainPlugin)(app);
+		PropertyGrid& property_grid = app.getPropertyGrid();
+		property_grid.addPlugin(*m_emitter_plugin);
+		property_grid.addPlugin(*m_env_probe_plugin);
+		property_grid.addPlugin(*m_terrain_plugin);
+
+		m_scene_view = LUMIX_NEW(allocator, SceneView)(app);
+		m_game_view = LUMIX_NEW(allocator, GameView)(app);
+		m_import_asset_dialog = LUMIX_NEW(allocator, ImportAssetDialog)(app);
+		m_editor_ui_render_plugin = LUMIX_NEW(allocator, EditorUIRenderPlugin)(app, *m_scene_view, *m_game_view);
+		m_fur_painter_plugin = LUMIX_NEW(allocator, FurPainterPlugin)(app);
+		m_render_stats_plugin = LUMIX_NEW(allocator, RenderStatsPlugin)(app);
+		m_shader_editor_plugin = LUMIX_NEW(allocator, ShaderEditorPlugin)(app);
+		app.addPlugin(*m_scene_view);
+		app.addPlugin(*m_game_view);
+		app.addPlugin(*m_import_asset_dialog);
+		app.addPlugin(*m_editor_ui_render_plugin);
+		app.addPlugin(*m_fur_painter_plugin);
+		app.addPlugin(*m_render_stats_plugin);
+		app.addPlugin(*m_shader_editor_plugin);
+
+		m_gizmo_plugin = LUMIX_NEW(allocator, GizmoPlugin)();
+		app.getWorldEditor().addPlugin(*m_gizmo_plugin);
+	}
+
+
+	~StudioAppPlugin()
+	{
+		IAllocator& allocator = m_app.getWorldEditor().getAllocator();
+
+		AssetBrowser& asset_browser = m_app.getAssetBrowser();
+		asset_browser.removePlugin(*m_model_plugin);
+		asset_browser.removePlugin(*m_material_plugin);
+		asset_browser.removePlugin(*m_font_plugin);
+		asset_browser.removePlugin(*m_texture_plugin);
+		asset_browser.removePlugin(*m_shader_plugin);
+
+		LUMIX_DELETE(allocator, m_model_plugin);
+		LUMIX_DELETE(allocator, m_material_plugin);
+		LUMIX_DELETE(allocator, m_font_plugin);
+		LUMIX_DELETE(allocator, m_texture_plugin);
+		LUMIX_DELETE(allocator, m_shader_plugin);
+
+		PropertyGrid& property_grid = m_app.getPropertyGrid();
+
+		property_grid.removePlugin(*m_emitter_plugin);
+		property_grid.removePlugin(*m_env_probe_plugin);
+		property_grid.removePlugin(*m_terrain_plugin);
+
+		LUMIX_DELETE(allocator, m_emitter_plugin);
+		LUMIX_DELETE(allocator, m_env_probe_plugin);
+		LUMIX_DELETE(allocator, m_terrain_plugin);
+
+		m_app.removePlugin(*m_scene_view);
+		m_app.removePlugin(*m_game_view);
+		m_app.removePlugin(*m_import_asset_dialog);
+		m_app.removePlugin(*m_editor_ui_render_plugin);
+		m_app.removePlugin(*m_fur_painter_plugin);
+		m_app.removePlugin(*m_render_stats_plugin);
+		m_app.removePlugin(*m_shader_editor_plugin);
+
+		LUMIX_DELETE(allocator, m_scene_view);
+		LUMIX_DELETE(allocator, m_game_view);
+		LUMIX_DELETE(allocator, m_import_asset_dialog);
+		LUMIX_DELETE(allocator, m_editor_ui_render_plugin);
+		LUMIX_DELETE(allocator, m_fur_painter_plugin);
+		LUMIX_DELETE(allocator, m_render_stats_plugin);
+		LUMIX_DELETE(allocator, m_shader_editor_plugin);
+
+		m_app.getWorldEditor().removePlugin(*m_gizmo_plugin);
+		LUMIX_DELETE(allocator, m_gizmo_plugin);
+	}
+
+
+	StudioApp& m_app;
+	AddTerrainComponentPlugin* m_add_terrain_plugin;
+	ModelPlugin* m_model_plugin;
+	MaterialPlugin* m_material_plugin;
+	FontPlugin* m_font_plugin;
+	TexturePlugin* m_texture_plugin;
+	ShaderPlugin* m_shader_plugin;
+	EmitterPlugin* m_emitter_plugin;
+	EnvironmentProbePlugin* m_env_probe_plugin;
+	TerrainPlugin* m_terrain_plugin;
+	SceneView* m_scene_view;
+	GameView* m_game_view;
+	ImportAssetDialog* m_import_asset_dialog;
+	EditorUIRenderPlugin* m_editor_ui_render_plugin;
+	FurPainterPlugin* m_fur_painter_plugin;
+	RenderStatsPlugin* m_render_stats_plugin;
+	ShaderEditorPlugin* m_shader_editor_plugin;
+	GizmoPlugin* m_gizmo_plugin;
+};
 
 
 LUMIX_STUDIO_ENTRY(renderer)
 {
 	auto& allocator = app.getWorldEditor().getAllocator();
-
-	Model::force_keep_skin = true;
-
-	app.registerComponent("camera", "Render/Camera");
-	app.registerComponent("global_light", "Render/Global light");
-
-	app.registerComponentWithResource("renderable", "Render/Mesh", Model::TYPE, *Reflection::getProperty(MODEL_INSTANCE_TYPE, "Source"));
-	app.registerComponentWithResource("particle_emitter", "Render/Particle emitter/Emitter", Material::TYPE, *Reflection::getProperty(PARTICLE_EMITTER_TYPE, "Material"));
-	app.registerComponentWithResource("scripted_particle_emitter", "Render/Particle emitter/DO NOT USE YET! Scripted Emitter", Material::TYPE, *Reflection::getProperty(SCRIPTED_PARTICLE_EMITTER_TYPE, "Material"));
-	app.registerComponent("particle_emitter_spawn_shape", "Render/Particle emitter/Spawn shape");
-	app.registerComponent("particle_emitter_alpha", "Render/Particle emitter/Alpha");
-	app.registerComponent("particle_emitter_plane", "Render/Particle emitter/Plane");
-	app.registerComponent("particle_emitter_force", "Render/Particle emitter/Force");
-	app.registerComponent("particle_emitter_attractor", "Render/Particle emitter/Attractor");
-	app.registerComponent("particle_emitter_subimage", "Render/Particle emitter/Subimage");
-	app.registerComponent("particle_emitter_linear_movement", "Render/Particle emitter/Linear movement");
-	app.registerComponent("particle_emitter_random_rotation", "Render/Particle emitter/Random rotation");
-	app.registerComponent("particle_emitter_size", "Render/Particle emitter/Size");
-	app.registerComponent("point_light", "Render/Point light");
-	app.registerComponent("decal", "Render/Decal");
-	app.registerComponent("bone_attachment", "Render/Bone attachment");
-	app.registerComponent("environment_probe", "Render/Environment probe");
-	app.registerComponentWithResource("text_mesh", "Render/Text 3D", FontResource::TYPE, *Reflection::getProperty(TEXT_MESH_TYPE, "Font"));
-
-	auto* add_terrain_plugin = LUMIX_NEW(allocator, AddTerrainComponentPlugin)(app);
-	app.registerComponent("terrain", *add_terrain_plugin);
-
-	auto& asset_browser = app.getAssetBrowser();
-	asset_browser.addPlugin(*LUMIX_NEW(allocator, ModelPlugin)(app));
-	asset_browser.addPlugin(*LUMIX_NEW(allocator, MaterialPlugin)(app));
-	asset_browser.addPlugin(*LUMIX_NEW(allocator, FontPlugin)(app));
-	asset_browser.addPlugin(*LUMIX_NEW(allocator, TexturePlugin)(app));
-	asset_browser.addPlugin(*LUMIX_NEW(allocator, ShaderPlugin)(app));
-
-	auto& property_grid = app.getPropertyGrid();
-	property_grid.addPlugin(*LUMIX_NEW(allocator, EmitterPlugin)(app));
-	property_grid.addPlugin(*LUMIX_NEW(allocator, EnvironmentProbePlugin)(app));
-	property_grid.addPlugin(*LUMIX_NEW(allocator, TerrainPlugin)(app));
-
-	auto* scene_view_plugin = LUMIX_NEW(allocator, SceneView)(app);
-	app.addPlugin(*scene_view_plugin);
-	app.addPlugin(*LUMIX_NEW(allocator, ImportAssetDialog)(app));
-	auto* game_view_plugin = LUMIX_NEW(allocator, GameView)(app);
-	app.addPlugin(*game_view_plugin);
-	app.addPlugin(*LUMIX_NEW(allocator, EditorUIRenderPlugin)(app, *scene_view_plugin, *game_view_plugin));
-	app.addPlugin(*LUMIX_NEW(allocator, FurPainterPlugin)(app));
-	app.addPlugin(*LUMIX_NEW(allocator, RenderStatsPlugin)(app));
-	app.addPlugin(*LUMIX_NEW(allocator, ShaderEditorPlugin)(app));
-
-	app.getWorldEditor().addPlugin(*LUMIX_NEW(allocator, WorldEditorPlugin)());
-}
-
-
+	return LUMIX_NEW(allocator, StudioAppPlugin)(app);
 }

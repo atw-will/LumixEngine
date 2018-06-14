@@ -68,6 +68,12 @@ void Universe::addScene(IScene* scene)
 }
 
 
+void Universe::removeScene(IScene* scene)
+{
+	m_scenes.eraseItemFast(scene);
+}
+
+
 const Vec3& Universe::getPosition(Entity entity) const
 {
 	return m_entities[entity.index].position;
@@ -268,12 +274,38 @@ const char* Universe::getEntityName(Entity entity) const
 }
 
 
-Entity Universe::getEntityByName(const char* name)
+Entity Universe::findByName(Entity parent, const char* name)
 {
-	for (const EntityName& name_data : m_names)
+	if (parent.isValid())
 	{
-		if (equalStrings(name_data.name, name)) return name_data.entity;
+		int h_idx = m_entities[parent.index].hierarchy;
+		if (h_idx < 0) return INVALID_ENTITY;
+
+		Entity e = m_hierarchy[h_idx].first_child;
+		while (e.isValid())
+		{
+			const EntityData& data = m_entities[e.index];
+			int name_idx = data.name;
+			if (name_idx >= 0)
+			{
+				if (equalStrings(m_names[name_idx].name, name)) return e;
+			}
+			e = m_hierarchy[data.hierarchy].next_sibling;
+		}
 	}
+	else
+	{
+		for (int i = 0, c = m_names.size(); i < c; ++i)
+		{
+			if (equalStrings(m_names[i].name, name))
+			{
+				const EntityData& data = m_entities[m_names[i].entity.index];
+				if (data.hierarchy < 0) return m_names[i].entity;
+				if (!m_hierarchy[data.hierarchy].parent.isValid()) return m_names[i].entity;
+			}
+		}
+	}
+
 	return INVALID_ENTITY;
 }
 
@@ -316,6 +348,38 @@ void Universe::emplaceEntity(Entity entity)
 	data.components = 0;
 	data.valid = true;
 	m_entity_created.invoke(entity);
+}
+
+
+Entity Universe::cloneEntity(Entity entity)
+{
+	Transform tr = getTransform(entity);
+	Entity parent = getParent(entity);
+	Entity clone = createEntity(tr.pos, tr.rot);
+	setScale(clone, tr.scale);
+	setParent(parent, clone);
+
+	OutputBlob blob_out(m_allocator);
+	blob_out.reserve(1024);
+	for (ComponentUID cmp = getFirstComponent(entity); cmp.isValid(); cmp = getNextComponent(cmp))
+	{
+		blob_out.clear();
+		struct : ISaveEntityGUIDMap
+		{
+			EntityGUID get(Entity entity) override { return { (u64)entity.index }; }
+		} save_map;
+		TextSerializer serializer(blob_out, save_map);
+		serializeComponent(serializer, cmp.type, entity);
+		
+		InputBlob blob_in(blob_out);
+		struct : ILoadEntityGUIDMap
+		{
+			Entity get(EntityGUID guid) override { return { (int)guid.value }; }
+		} load_map;
+		TextDeserializer deserializer(blob_in, load_map);
+		deserializeComponent(deserializer, clone, cmp.type, cmp.scene->getVersion());
+	}
+	return clone;
 }
 
 

@@ -274,6 +274,7 @@ struct LUMIX_ENGINE_API Vec4
 	{
 	}
 
+	Vec2 xy() const { return Vec2(x, y); }
 	Vec3 xyz() const { return Vec3(x, y, z); }
 	Vec3 rgb() const { return Vec3(x, y, z); }
 
@@ -406,8 +407,6 @@ struct LUMIX_ENGINE_API Vec4
 		return x * x + y * y + z * z + w * w;
 	}
 
-	operator Vec3() { return Vec3(x, y, z); }
-
 	union
 	{
 		struct { float x, y, z, w; };
@@ -418,6 +417,12 @@ struct LUMIX_ENGINE_API Vec4
 	static const Vec4 MIN;
 	static const Vec4 ZERO;
 };
+
+
+inline Vec4 operator *(float f, const Vec4& v)
+{
+	return Vec4(f * v.x, f * v.y, f * v.z, f * v.w);
+}
 
 
 inline Vec4 operator*(const Vec4& v, float s)
