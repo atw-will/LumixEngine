@@ -1,0 +1,3 @@
+[submodule "external/recast"]
+	path = external/recast
+	url = https://github.com/recastnavigation/recastnavigation
