@@ -349,7 +349,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		{
 			if (agent.agent < 0) continue;
 			const dtCrowdAgent* dt_agent = m_crowd->getAgent(agent.agent);
-			if (dt_agent->paused) continue;
+			if (!dt_agent->active) continue;
 
 			Vec3 pos = m_universe.getPosition(agent.entity);
 			Quat rot = m_universe.getRotation(agent.entity);
@@ -382,7 +382,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		{
 			if (agent.agent < 0) continue;
 			const dtCrowdAgent* dt_agent = m_crowd->getAgent(agent.agent);
-			if (dt_agent->paused) continue;
+			if (!dt_agent->active) continue;
 
 			Vec3 pos = m_universe.getPosition(agent.entity);
 			Quat rot = m_universe.getRotation(agent.entity);
@@ -402,13 +402,14 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 			}
 		}
 
-		m_crowd->doMove(time_delta);
+		//m_crowd->doMove(time_delta);
+		m_crowd->update(time_delta,NULL);
 
 		for (auto& agent : m_agents)
 		{
 			if (agent.agent < 0) continue;
 			const dtCrowdAgent* dt_agent = m_crowd->getAgent(agent.agent);
-			if (dt_agent->paused) continue;
+			if (!dt_agent->active) continue;
 
 			m_universe.setPosition(agent.entity, *(Vec3*)dt_agent->npos);
 
@@ -992,7 +993,8 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		if (agent.agent < 0) return;
 
 		dtCrowdAgent* dt_agent = m_crowd->getEditableAgent(agent.agent);
-		if (dt_agent) dt_agent->paused = !active;
+		//if (dt_agent) dt_agent->paused = !active;
+		if (dt_agent) dt_agent->active = active;
 	}
 
 

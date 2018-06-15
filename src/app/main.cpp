@@ -21,11 +21,11 @@
 #include "renderer/pipeline.h"
 #include "renderer/renderer.h"
 #include "renderer/texture.h"
-#include <cstdio>
 #include <SDL.h>
 #include <SDL_syswm.h>
+#include <cstdio>
 #ifdef _WIN32
-	#include <windows.h>
+#include <windows.h>
 #endif
 
 
@@ -112,7 +112,7 @@ public:
 
 				parser.getCurrent(m_pipeline_define.data, lengthOf(m_pipeline_define.data));
 			}
-			else if(parser.currentEquals("-script"))
+			else if (parser.currentEquals("-script"))
 			{
 				if (!parser.next()) break;
 
@@ -133,11 +133,11 @@ public:
 
 		m_mem_file_device = LUMIX_NEW(m_allocator, FS::MemoryFileDevice)(m_allocator);
 		char current_dir[MAX_PATH_LENGTH];
-		#ifdef _WIN32
-			GetCurrentDirectory(sizeof(current_dir), current_dir); 
-		#else
-			current_dir[0] = '\0';
-		#endif
+#ifdef _WIN32
+		GetCurrentDirectory(sizeof(current_dir), current_dir);
+#else
+		current_dir[0] = '\0';
+#endif
 		m_disk_file_device = LUMIX_NEW(m_allocator, FS::DiskFileDevice)("disk", current_dir, m_allocator);
 		m_pack_file_device = LUMIX_NEW(m_allocator, FS::PackFileDevice)(m_allocator);
 
@@ -148,21 +148,25 @@ public:
 		m_file_system->setDefaultDevice("memory:disk:pack");
 		m_file_system->setSaveGameDevice("memory:disk");
 
+		int WINDOW_SIZE_X = 1024;
+		int WINDOW_SIZE_Y = 768;
+
 		m_engine = Engine::create(current_dir, "", m_file_system, m_allocator);
-		m_window = SDL_CreateWindow("Lumix App", 0, 0, 600, 400, flags);
+		m_window = SDL_CreateWindow(
+			"Lumix App", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WINDOW_SIZE_X, WINDOW_SIZE_Y, flags);
 		if (!m_window_mode) SDL_SetWindowFullscreen(m_window, SDL_WINDOW_FULLSCREEN_DESKTOP);
 		SDL_SysWMinfo window_info;
 		SDL_VERSION(&window_info.version);
 		SDL_GetWindowWMInfo(m_window, &window_info);
 		Engine::PlatformData platform_data = {};
-		#ifdef _WIN32
-			platform_data.window_handle = window_info.info.win.window;
-		#elif defined(__linux__)
-			platform_data.window_handle = (void*)(uintptr_t)window_info.info.x11.window;
-			platform_data.display = window_info.info.x11.display;
-		#else
-			#error PLATFORM_NOT_SUPPORTED
-		#endif
+#ifdef _WIN32
+		platform_data.window_handle = window_info.info.win.window;
+#elif defined(__linux__)
+		platform_data.window_handle = (void*)(uintptr_t)window_info.info.x11.window;
+		platform_data.display = window_info.info.x11.display;
+#else
+#error PLATFORM_NOT_SUPPORTED
+#endif
 		m_engine->setPlatformData(platform_data);
 
 		m_engine->getPluginManager().load("renderer");
@@ -172,13 +176,13 @@ public:
 		m_engine->getPluginManager().load("lua_script");
 		m_engine->getPluginManager().load("physics");
 		m_engine->getPluginManager().load("gui");
-		#ifdef LUMIXENGINE_PLUGINS
-			const char* plugins[] = { LUMIXENGINE_PLUGINS };
-			for (auto plugin : plugins)
-			{
-				m_engine->getPluginManager().load(plugin);
-			}
-		#endif
+#ifdef LUMIXENGINE_PLUGINS
+		const char* plugins[] = {LUMIXENGINE_PLUGINS};
+		for (auto plugin : plugins)
+		{
+			m_engine->getPluginManager().load(plugin);
+		}
+#endif
 		m_engine->getInputSystem().enable(true);
 		Renderer* renderer = static_cast<Renderer*>(m_engine->getPluginManager().getPlugin("renderer"));
 		m_pipeline = Pipeline::create(*renderer, Path(m_pipeline_path), m_pipeline_define, m_engine->getAllocator());
@@ -193,8 +197,8 @@ public:
 
 		m_universe = &m_engine->createUniverse(true);
 		m_pipeline->setScene((RenderScene*)m_universe->getScene(crc32("renderer")));
-		m_pipeline->resize(600, 400);
-		renderer->resize(600, 400);
+		m_pipeline->resize(WINDOW_SIZE_X, WINDOW_SIZE_Y);
+		renderer->resize(WINDOW_SIZE_X, WINDOW_SIZE_Y);
 
 		registerLuaAPI();
 
@@ -203,7 +207,7 @@ public:
 		m_gui_interface->pipeline = m_pipeline;
 
 		gui_system->setInterface(m_gui_interface);
-		
+
 		SDL_ShowCursor(false);
 		SDL_SetRelativeMouseMode(SDL_TRUE);
 		onResize();
@@ -235,11 +239,12 @@ public:
 	{
 		lua_State* L = m_engine->getState();
 
-		#define REGISTER_FUNCTION(F) \
-			do { \
-				auto* f = &LuaWrapper::wrapMethodClosure<App, decltype(&App::F), &App::F>; \
-				LuaWrapper::createSystemClosure(L, "App", this, #F, f); \
-			} while(false) \
+#define REGISTER_FUNCTION(F)                                                       \
+	do                                                                             \
+	{                                                                              \
+		auto* f = &LuaWrapper::wrapMethodClosure<App, decltype(&App::F), &App::F>; \
+		LuaWrapper::createSystemClosure(L, "App", this, #F, f);                    \
+	} while (false)
 
 		REGISTER_FUNCTION(loadUniverse);
 		REGISTER_FUNCTION(setUniverse);
@@ -247,7 +252,7 @@ public:
 		REGISTER_FUNCTION(exit);
 		REGISTER_FUNCTION(isFinished);
 
-		#undef REGISTER_FUNCTION
+#undef REGISTER_FUNCTION
 
 		LuaWrapper::createSystemVariable(L, "App", "universe", m_universe);
 	}
@@ -263,15 +268,15 @@ public:
 
 		ASSERT(file.getBuffer());
 		InputBlob blob(file.getBuffer(), (int)file.size());
-		#pragma pack(1)
-			struct Header
-			{
-				u32 magic;
-				int version;
-				u32 hash;
-				u32 engine_hash;
-			};
-		#pragma pack()
+#pragma pack(1)
+		struct Header
+		{
+			u32 magic;
+			int version;
+			u32 hash;
+			u32 engine_hash;
+		};
+#pragma pack()
 		Header header;
 		blob.read(header);
 		if (crc32((const u8*)blob.getData() + sizeof(header), blob.getSize() - sizeof(header)) != header.hash)
@@ -344,7 +349,7 @@ public:
 		{
 			switch (event.type)
 			{
-			case SDL_MOUSEBUTTONDOWN:
+				case SDL_MOUSEBUTTONDOWN:
 				{
 					Vec2 rel_mp = {(float)event.button.x, (float)event.button.y};
 					InputSystem::Event input_event;
@@ -357,9 +362,9 @@ public:
 					input.injectEvent(input_event);
 				}
 				break;
-			case SDL_MOUSEBUTTONUP:
+				case SDL_MOUSEBUTTONUP:
 				{
-					Vec2 rel_mp = { (float)event.button.x, (float)event.button.y };
+					Vec2 rel_mp = {(float)event.button.x, (float)event.button.y};
 					InputSystem::Event input_event;
 					input_event.type = InputSystem::Event::BUTTON;
 					input_event.device = input.getMouseDevice();
@@ -370,9 +375,9 @@ public:
 					input.injectEvent(input_event);
 				}
 				break;
-			case SDL_MOUSEMOTION:
+				case SDL_MOUSEMOTION:
 				{
-					Vec2 rel_mp = { (float)event.motion.x, (float)event.motion.y };
+					Vec2 rel_mp = {(float)event.motion.x, (float)event.motion.y};
 					InputSystem::Event input_event;
 					input_event.type = InputSystem::Event::AXIS;
 					input_event.device = input.getMouseDevice();
@@ -383,7 +388,7 @@ public:
 					input.injectEvent(input_event);
 				}
 				break;
-			case SDL_KEYDOWN:
+				case SDL_KEYDOWN:
 				{
 					InputSystem::Event input_event;
 					input_event.type = InputSystem::Event::BUTTON;
@@ -394,7 +399,7 @@ public:
 					input.injectEvent(input_event);
 				}
 				break;
-			case SDL_TEXTINPUT:
+				case SDL_TEXTINPUT:
 				{
 					InputSystem::Event input_event;
 					input_event.type = InputSystem::Event::TEXT_INPUT;
@@ -404,7 +409,7 @@ public:
 					input.injectEvent(input_event);
 				}
 				break;
-			case SDL_KEYUP:
+				case SDL_KEYUP:
 				{
 					InputSystem::Event input_event;
 					input_event.type = InputSystem::Event::BUTTON;
@@ -415,46 +420,38 @@ public:
 					input.injectEvent(input_event);
 				}
 				break;
-			case SDL_WINDOWEVENT:
-				switch (event.window.event)
-				{
-				case SDL_WINDOWEVENT_CLOSE:
-					m_finished = true;
+				case SDL_WINDOWEVENT:
+					switch (event.window.event)
+					{
+						case SDL_WINDOWEVENT_CLOSE: m_finished = true; break;
+						case SDL_WINDOWEVENT_RESIZED:
+						case SDL_WINDOWEVENT_SIZE_CHANGED:
+						case SDL_WINDOWEVENT_MOVED: onResize(); break;
+					}
 					break;
-				case SDL_WINDOWEVENT_RESIZED:
-				case SDL_WINDOWEVENT_SIZE_CHANGED:
-				case SDL_WINDOWEVENT_MOVED:
-					onResize();
-					break;
-				}
-				break;
-			case SDL_QUIT: m_finished = true; break;
-			case SDL_WINDOWEVENT_FOCUS_GAINED: m_engine->getInputSystem().enable(true); break;
-			case SDL_WINDOWEVENT_FOCUS_LOST: m_engine->getInputSystem().enable(false); break;
+				case SDL_QUIT: m_finished = true; break;
+				case SDL_WINDOWEVENT_FOCUS_GAINED: m_engine->getInputSystem().enable(true); break;
+				case SDL_WINDOWEVENT_FOCUS_LOST: m_engine->getInputSystem().enable(false); break;
 			}
 		}
 	}
 
 
-
 	static void outputToVS(const char* system, const char* message)
 	{
-		#ifdef _MSC_VER
-			char tmp[2048];
-			copyString(tmp, system);
-			catString(tmp, " : ");
-			catString(tmp, message);
-			catString(tmp, "\r");
+#ifdef _MSC_VER
+		char tmp[2048];
+		copyString(tmp, system);
+		catString(tmp, " : ");
+		catString(tmp, message);
+		catString(tmp, "\r");
 
-			OutputDebugString(tmp);
-		#endif
+		OutputDebugString(tmp);
+#endif
 	}
 
 
-	static void outputToConsole(const char* system, const char* message) 
-	{
-		printf("%s: %s\n", system, message); 
-	}
+	static void outputToConsole(const char* system, const char* message) { printf("%s: %s\n", system, message); }
 
 
 	void exit(int exit_code)
@@ -519,8 +516,6 @@ private:
 
 
 App* App::s_instance = nullptr;
-
-
 }
 
 #ifdef _WIN32
