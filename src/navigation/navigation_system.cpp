@@ -67,6 +67,7 @@ struct NavigationSystem LUMIX_FINAL : public IPlugin
 		// register flags
 		Material::getCustomFlag("no_navigation");
 		Material::getCustomFlag("nonwalkable");
+		Material::getCustomFlag("road");
 	}
 
 

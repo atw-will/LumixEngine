@@ -1,4 +1,3 @@
-#include "navigation_scene.h"
 #include "animation/animation_scene.h"
 #include "engine/array.h"
 #include "engine/blob.h"
@@ -15,6 +14,7 @@
 #include "engine/universe/universe.h"
 #include "engine/vec.h"
 #include "lua_script/lua_script_system.h"
+#include "navigation_scene.h"
 #include "renderer/material.h"
 #include "renderer/model.h"
 #include "renderer/render_scene.h"
@@ -91,12 +91,12 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	{
 		setGeneratorParams(0.3f, 0.1f, 0.3f, 2.0f, 60.0f, 0.3f);
 		m_universe.entityTransformed().bind<NavigationSceneImpl, &NavigationSceneImpl::onEntityMoved>(this);
-		universe.registerComponentType(NAVMESH_AGENT_TYPE
-			, this
-			, &NavigationSceneImpl::createAgent
-			, &NavigationSceneImpl::destroyAgent
-			, &NavigationSceneImpl::serializeAgent
-			, &NavigationSceneImpl::deserializeAgent);
+		universe.registerComponentType(NAVMESH_AGENT_TYPE,
+			this,
+			&NavigationSceneImpl::createAgent,
+			&NavigationSceneImpl::destroyAgent,
+			&NavigationSceneImpl::serializeAgent,
+			&NavigationSceneImpl::deserializeAgent);
 	}
 
 
@@ -107,10 +107,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	}
 
 
-	void clear() override
-	{
-		m_agents.clear();
-	}
+	void clear() override { m_agents.clear(); }
 
 
 	void onEntityMoved(Entity entity)
@@ -243,6 +240,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 
 		u32 no_navigation_flag = Material::getCustomFlag("no_navigation");
 		u32 nonwalkable_flag = Material::getCustomFlag("nonwalkable");
+		u32 road_flag = Material::getCustomFlag("road");
 		for (Entity model_instance = render_scene->getFirstModelInstance(); model_instance.isValid();
 			 model_instance = render_scene->getNextModelInstance(model_instance))
 		{
@@ -264,6 +262,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 
 				if (mesh.material->isCustomFlag(no_navigation_flag)) continue;
 				bool is_walkable = !mesh.material->isCustomFlag(nonwalkable_flag);
+				bool is_road = mesh.material->isCustomFlag(road_flag);
 				auto* vertices = &mesh.vertices[0];
 				if (is16)
 				{
@@ -275,7 +274,11 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 						Vec3 c = mtx.transformPoint(vertices[indices16[i + 2]]);
 
 						Vec3 n = crossProduct(a - b, a - c).normalized();
-						u8 area = n.y > walkable_threshold && is_walkable ? RC_WALKABLE_AREA : 0;
+						u8 area = RC_NULL_AREA;
+						if (n.y > walkable_threshold && is_walkable) 
+						{
+							u8 area = is_road ? 32 : RC_WALKABLE_AREA;
+						}
 						rcRasterizeTriangle(&ctx, &a.x, &b.x, &c.x, area, solid);
 					}
 				}
@@ -289,7 +292,12 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 						Vec3 c = mtx.transformPoint(vertices[indices32[i + 2]]);
 
 						Vec3 n = crossProduct(a - b, a - c).normalized();
-						u8 area = n.y > walkable_threshold && is_walkable ? RC_WALKABLE_AREA : 0;
+						u8 area = RC_NULL_AREA;
+						if (n.y > walkable_threshold && is_walkable)
+						{
+							u8 area = is_road ? 32 : RC_WALKABLE_AREA;
+						}
+						//u8 area = n.y > walkable_threshold && is_walkable ? RC_WALKABLE_AREA : 0;
 						rcRasterizeTriangle(&ctx, &a.x, &b.x, &c.x, area, solid);
 					}
 				}
@@ -301,7 +309,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	void onPathFinished(const Agent& agent)
 	{
 		if (!m_script_scene) return;
-		
+
 		if (!m_universe.hasComponent(agent.entity, LUA_SCRIPT_TYPE)) return;
 
 		for (int i = 0, c = m_script_scene->getScriptCount(agent.entity); i < c; ++i)
@@ -314,22 +322,13 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	}
 
 
-	bool isFinished(Entity entity) override
-	{
-		return m_agents[entity].is_finished;
-	}
+	bool isFinished(Entity entity) override { return m_agents[entity].is_finished; }
 
 
-	float getAgentSpeed(Entity entity) override
-	{
-		return m_agents[entity].speed;
-	}
+	float getAgentSpeed(Entity entity) override { return m_agents[entity].speed; }
 
 
-	float getAgentYawDiff(Entity entity) override
-	{
-		return m_agents[entity].yaw_diff;
-	}
+	float getAgentYawDiff(Entity entity) override { return m_agents[entity].yaw_diff; }
 
 
 	void setAgentRootMotion(Entity entity, const Vec3& root_motion) override
@@ -392,7 +391,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 				{
 					RigidTransform root_motion = anim_scene->getControllerRootMotion(agent.entity);
 					agent.root_motion = root_motion.pos;
-					//m_universe.setRotation(agent.entity, m_universe.getRotation(agent.entity) * root_motion.rot);
+					// m_universe.setRotation(agent.entity, m_universe.getRotation(agent.entity) * root_motion.rot);
 				}
 			}
 			if (agent.flags & Agent::USE_ROOT_MOTION)
@@ -402,8 +401,8 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 			}
 		}
 
-		//m_crowd->doMove(time_delta);
-		m_crowd->update(time_delta,NULL);
+		// m_crowd->doMove(time_delta);
+		m_crowd->update(time_delta, NULL);
 
 		for (auto& agent : m_agents)
 		{
@@ -471,12 +470,12 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		float pqz = q[2] - p[2];
 		float dx = pt[0] - p[0];
 		float dz = pt[2] - p[2];
-		float d = pqx*pqx + pqz*pqz;
-		float t = pqx*dx + pqz*dz;
+		float d = pqx * pqx + pqz * pqz;
+		float t = pqx * dx + pqz * dz;
 		if (d != 0) t /= d;
-		dx = p[0] + t*pqx - pt[0];
-		dz = p[2] + t*pqz - pt[2];
-		return dx*dx + dz*dz;
+		dx = p[0] + t * pqx - pt[0];
+		dz = p[2] + t * pqz - pt[2];
+		return dx * dx + dz * dz;
 	}
 
 
@@ -574,16 +573,10 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	}
 
 
-	DelegateList<void(float)>& onUpdate() override
-	{
-		return m_on_update;
-	}
+	DelegateList<void(float)>& onUpdate() override { return m_on_update; }
 
 
-	bool hasDebugDrawData() const override
-	{
-		return m_debug_contours != nullptr;
-	}
+	bool hasDebugDrawData() const override { return m_debug_contours != nullptr; }
 
 
 	void debugDrawContours() override
@@ -601,8 +594,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 
 			if (c.nverts < 2) continue;
 
-			Vec3 first =
-				orig + Vec3((float)c.verts[0] * cs, (float)c.verts[1] * ch, (float)c.verts[2] * cs);
+			Vec3 first = orig + Vec3((float)c.verts[0] * cs, (float)c.verts[1] * ch, (float)c.verts[2] * cs);
 			Vec3 prev = first;
 			for (int j = 1; j < c.nverts; ++j)
 			{
@@ -617,10 +609,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	}
 
 
-	bool isNavmeshReady() const override
-	{
-		return m_navmesh != nullptr;
-	}
+	bool isNavmeshReady() const override { return m_navmesh != nullptr; }
 
 
 	void fileLoaded(FS::IFile& file, bool success)
@@ -671,10 +660,11 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		FS::ReadCallback cb;
 		cb.bind<NavigationSceneImpl, &NavigationSceneImpl::fileLoaded>(this);
 		FS::FileSystem& fs = m_engine.getFileSystem();
-		return fs.openAsync(fs.getDefaultDevice(), Path(path), FS::Mode::OPEN_AND_READ, cb) != FS::FileSystem::INVALID_ASYNC;
+		return fs.openAsync(fs.getDefaultDevice(), Path(path), FS::Mode::OPEN_AND_READ, cb) !=
+			   FS::FileSystem::INVALID_ASYNC;
 	}
 
-	
+
 	bool save(const char* path) override
 	{
 		if (!m_navmesh) return false;
@@ -711,14 +701,14 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		Vec3 orig = m_debug_tile_origin;
 		int width = m_debug_heightfield->width;
 		float cell_height = 0.1f;
-		for(int z = 0; z < m_debug_heightfield->height; ++z)
+		for (int z = 0; z < m_debug_heightfield->height; ++z)
 		{
-			for(int x = 0; x < width; ++x)
+			for (int x = 0; x < width; ++x)
 			{
 				float fx = orig.x + x * CELL_SIZE;
 				float fz = orig.z + z * CELL_SIZE;
 				const rcSpan* span = m_debug_heightfield->spans[x + z * width];
-				while(span)
+				while (span)
 				{
 					Vec3 mins(fx, orig.y + span->smin * cell_height, fz);
 					Vec3 maxs(fx + CELL_SIZE, orig.y + span->smax * cell_height, fz + CELL_SIZE);
@@ -878,7 +868,6 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 						render_scene->addDebugLine(Vec3(x, va[1] + pady, va[2]), Vec3(x, vb[1] + pady, vb[2]), col, 0);
 						render_scene->addDebugLine(Vec3(x, vb[1] + pady, vb[2]), Vec3(x, vb[1] - pady, vb[2]), col, 0);
 						render_scene->addDebugLine(Vec3(x, vb[1] - pady, vb[2]), Vec3(x, va[1] - pady, va[2]), col, 0);
-
 					}
 					else if (side == 2 || side == 6)
 					{
@@ -891,7 +880,6 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 						render_scene->addDebugLine(Vec3(vb[0], vb[1] + pady, z), Vec3(vb[0], vb[1] - pady, z), col, 0);
 						render_scene->addDebugLine(Vec3(vb[0], vb[1] - pady, z), Vec3(va[0], va[1] - pady, z), col, 0);
 					}
-
 				}
 			}
 		}
@@ -902,8 +890,10 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	{
 		if (pos.x > m_aabb.max.x || pos.x < m_aabb.min.x || pos.z > m_aabb.max.z || pos.z < m_aabb.min.z) return;
 
-		int x = int((pos.x - m_aabb.min.x + (1 + m_config.borderSize) * m_config.cs) / (CELLS_PER_TILE_SIDE * CELL_SIZE));
-		int z = int((pos.z - m_aabb.min.z + (1 + m_config.borderSize) * m_config.cs) / (CELLS_PER_TILE_SIDE * CELL_SIZE));
+		int x =
+			int((pos.x - m_aabb.min.x + (1 + m_config.borderSize) * m_config.cs) / (CELLS_PER_TILE_SIDE * CELL_SIZE));
+		int z =
+			int((pos.z - m_aabb.min.z + (1 + m_config.borderSize) * m_config.cs) / (CELLS_PER_TILE_SIDE * CELL_SIZE));
 		const dtMeshTile* tile = m_navmesh->getTileAt(x, z, 0);
 		auto render_scene = static_cast<RenderScene*>(m_universe.getScene(crc32("renderer")));
 		if (!render_scene) return;
@@ -917,10 +907,10 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 			drawPoly(render_scene, *tile, *p);
 		}
 
-		if(outer_boundaries) drawPolyBoundaries(render_scene, *tile, 0xffff0000, false);
-		if(inner_boundaries) drawPolyBoundaries(render_scene, *tile, 0xffff0000, true);
+		if (outer_boundaries) drawPolyBoundaries(render_scene, *tile, 0xffff0000, false);
+		if (inner_boundaries) drawPolyBoundaries(render_scene, *tile, 0xffff0000, true);
 
-		if(portals) drawTilePortal(render_scene, *tile);
+		if (portals) drawTilePortal(render_scene, *tile);
 	}
 
 
@@ -943,7 +933,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	{
 		auto* scene = m_universe.getScene(crc32("lua_script"));
 		m_script_scene = static_cast<LuaScriptScene*>(scene);
-		
+
 		if (m_navmesh && !m_crowd) initCrowd();
 	}
 
@@ -964,6 +954,11 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 			Agent& agent = iter.value();
 			addCrowdAgent(agent);
 		}
+
+		// set up query for variable area costs
+		dtQueryFilter* walkFilter = m_crowd->getEditableFilter(1); // later move these to an enum
+		walkFilter->setAreaCost(RC_WALKABLE_AREA, 1.5f);
+		walkFilter->setAreaCost(32, 1.0f); // 32 is "road" material, definitely put this in a structure somewhere 
 
 		return true;
 	}
@@ -993,7 +988,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		if (agent.agent < 0) return;
 
 		dtCrowdAgent* dt_agent = m_crowd->getEditableAgent(agent.agent);
-		//if (dt_agent) dt_agent->paused = !active;
+		// if (dt_agent) dt_agent->paused = !active;
 		if (dt_agent) dt_agent->active = active;
 	}
 
@@ -1009,7 +1004,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		if (agent.agent < 0) return false;
 		dtPolyRef end_poly_ref;
 		dtQueryFilter filter;
-		static const float ext[] = { 1.0f, 20.0f, 1.0f };
+		static const float ext[] = {4.0f, 20.0f, 4.0f};
 		m_navquery->findNearestPoly(&dest.x, ext, &filter, &end_poly_ref, 0);
 		dtCrowdAgentParams params = m_crowd->getAgent(agent.agent)->params;
 		params.maxSpeed = speed;
@@ -1067,8 +1062,10 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 
 	bool generateTileAt(const Vec3& pos, bool keep_data) override
 	{
-		int x = int((pos.x - m_aabb.min.x + (1 + m_config.borderSize) * m_config.cs) / (CELLS_PER_TILE_SIDE * CELL_SIZE));
-		int z = int((pos.z - m_aabb.min.z + (1 + m_config.borderSize) * m_config.cs) / (CELLS_PER_TILE_SIDE * CELL_SIZE));
+		int x =
+			int((pos.x - m_aabb.min.x + (1 + m_config.borderSize) * m_config.cs) / (CELLS_PER_TILE_SIDE * CELL_SIZE));
+		int z =
+			int((pos.z - m_aabb.min.z + (1 + m_config.borderSize) * m_config.cs) / (CELLS_PER_TILE_SIDE * CELL_SIZE));
 		return generateTile(x, z, keep_data);
 	}
 
@@ -1238,7 +1235,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		if (!render_scene) return;
 
 		for (Entity model_instance = render_scene->getFirstModelInstance(); model_instance.isValid();
-			model_instance = render_scene->getNextModelInstance(model_instance))
+			 model_instance = render_scene->getNextModelInstance(model_instance))
 		{
 			auto* model = render_scene->getModelInstanceModel(model_instance);
 			if (!model) continue;
@@ -1339,7 +1336,9 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		params.maxSpeed = 10.0f;
 		params.collisionQueryRange = params.radius * 12.0f;
 		params.pathOptimizationRange = params.radius * 30.0f;
-		params.updateFlags = DT_CROWD_ANTICIPATE_TURNS | DT_CROWD_SEPARATION | DT_CROWD_OBSTACLE_AVOIDANCE | DT_CROWD_OPTIMIZE_TOPO | DT_CROWD_OPTIMIZE_VIS;
+		params.updateFlags = DT_CROWD_ANTICIPATE_TURNS | DT_CROWD_SEPARATION | DT_CROWD_OBSTACLE_AVOIDANCE |
+							 DT_CROWD_OPTIMIZE_TOPO | DT_CROWD_OPTIMIZE_VIS;
+		params.queryFilterType = 1; // road/grass filter; change to enum later
 		agent.agent = m_crowd->addAgent(&pos.x, &params);
 		if (agent.agent < 0)
 		{
@@ -1410,7 +1409,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 		agent.agent = -1;
 		if (m_crowd) addCrowdAgent(agent);
 		m_agents.insert(agent.entity, agent);
-		
+
 		m_universe.onComponentCreated(agent.entity, NAVMESH_AGENT_TYPE, this);
 	}
 
@@ -1456,7 +1455,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	}
 
 
-	void setIsGettingRootMotionFromAnim(Entity entity, bool is) override 
+	void setIsGettingRootMotionFromAnim(Entity entity, bool is) override
 	{
 		if (is)
 			m_agents[entity].flags |= Agent::GET_ROOT_MOTION_FROM_ANIM_CONTROLLER;
@@ -1465,10 +1464,7 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	}
 
 
-	bool useAgentRootMotion(Entity entity) override
-	{
-		return (m_agents[entity].flags & Agent::USE_ROOT_MOTION) != 0;
-	}
+	bool useAgentRootMotion(Entity entity) override { return (m_agents[entity].flags & Agent::USE_ROOT_MOTION) != 0; }
 
 
 	void setUseAgentRootMotion(Entity entity, bool use_root_motion) override
@@ -1480,28 +1476,16 @@ struct NavigationSceneImpl LUMIX_FINAL : public NavigationScene
 	}
 
 
-	void setAgentRadius(Entity entity, float radius) override
-	{
-		m_agents[entity].radius = radius;
-	}
+	void setAgentRadius(Entity entity, float radius) override { m_agents[entity].radius = radius; }
 
 
-	float getAgentRadius(Entity entity) override
-	{
-		return m_agents[entity].radius;
-	}
+	float getAgentRadius(Entity entity) override { return m_agents[entity].radius; }
 
 
-	void setAgentHeight(Entity entity, float height) override
-	{
-		m_agents[entity].height = height;
-	}
+	void setAgentHeight(Entity entity, float height) override { m_agents[entity].height = height; }
 
 
-	float getAgentHeight(Entity entity) override
-	{
-		return m_agents[entity].height;
-	}
+	float getAgentHeight(Entity entity) override { return m_agents[entity].height; }
 
 
 	IPlugin& getPlugin() const override { return m_system; }
