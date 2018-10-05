@@ -169,13 +169,13 @@ public:
 #endif
 		m_engine->setPlatformData(platform_data);
 
-		m_engine->getPluginManager().load("renderer");
-		m_engine->getPluginManager().load("animation");
-		m_engine->getPluginManager().load("audio");
-		m_engine->getPluginManager().load("navigation");
-		m_engine->getPluginManager().load("lua_script");
-		m_engine->getPluginManager().load("physics");
-		m_engine->getPluginManager().load("gui");
+		//m_engine->getPluginManager().load("renderer");
+		//m_engine->getPluginManager().load("animation");
+		//m_engine->getPluginManager().load("audio");
+		//m_engine->getPluginManager().load("navigation");
+		//m_engine->getPluginManager().load("lua_script");
+		//m_engine->getPluginManager().load("physics");
+		//m_engine->getPluginManager().load("gui");
 #ifdef LUMIXENGINE_PLUGINS
 		const char* plugins[] = {LUMIXENGINE_PLUGINS};
 		for (auto plugin : plugins)
