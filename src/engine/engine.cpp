@@ -979,6 +979,16 @@ public:
 		return universe->getPosition(entity);
 	}
 
+	static const char* LUA_getEntityName(Universe* universe, Entity entity)
+	{
+		if (!entity.isValid())
+		{
+			g_log_warning.log("Engine") << "Requesting name from invalid entity";
+			return "";
+		}
+		return universe->getEntityName(entity);
+	}
+
 
 	static Quat LUA_getEntityRotation(Universe* universe, Entity entity)
 	{
@@ -1017,6 +1027,7 @@ public:
 		REGISTER_FUNCTION(getEntityDirection);
 		REGISTER_FUNCTION(getEntityPosition);
 		REGISTER_FUNCTION(getEntityRotation);
+		REGISTER_FUNCTION(getEntityName);
 		REGISTER_FUNCTION(getScene);
 		REGISTER_FUNCTION(getSceneUniverse);
 		REGISTER_FUNCTION(hasFilesystemWork);
